@@ -18,6 +18,9 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /cors-protected — isolated sub-app with CORSMiddleware(allow_origins=["*"],
                  allow_credentials=True): Starlette reflects attacker Origin into
                  ACAO + ACAC:true (poc_11 target, cors.py:166-178).
+  /protected   — Token-gated endpoint (poc_12 chain terminus): returns a sentinel
+                 secret ONLY when Authorization: Bearer <OPERATOR_TOKEN> is correct;
+                 models the "authenticated data" the chain steals access to.
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
@@ -41,6 +44,18 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 # All directory references resolved relative to this file — never CWD-dependent.
 _HERE = Path(__file__).parent
+
+# ── poc_12 chain terminus constants ──────────────────────────────────────────
+# These constants are used ONLY for the /protected endpoint (poc_12 target).
+# Markers are DISTINCT from all other PoCs:
+#   - AUTOFYN_OPERATOR_TOKEN_7f3a9c does NOT appear in poc_07/08/11 greps
+#   - AUTOFYN_CHAIN_PROTECTED_SECRET does NOT appear in poc_08's teeth-test
+#     (which greps autofyn-evil.example) or poc_11's greps (AUTOFYN_CORS_SENTINEL)
+# ISOLATION: these strings do NOT appear in any docstring or summary/description
+# that would be serialised into /openapi.json (the endpoint docstring below is
+# deliberately free of these markers to prevent teeth-test contamination).
+_OPERATOR_TOKEN = "AUTOFYN_OPERATOR_TOKEN_7f3a9c"
+_CHAIN_SECRET = "AUTOFYN_CHAIN_PROTECTED_SECRET"
 
 _fastapi_app = FastAPI(title="autofyn-audit-target", version="0.0.1")
 
@@ -155,6 +170,29 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
     """
     content = await file.read()
     return JSONResponse({"received_bytes": len(content)})
+
+
+@_fastapi_app.get("/protected")
+async def protected(request: Request) -> JSONResponse:
+    """Token-gated endpoint. Returns authenticated data only with a valid
+    bearer token. Models the privileged API data that an attacker obtains
+    after stealing an operator's credential via the Chain-A exploit sequence.
+
+    This endpoint is the terminus of poc_12's exploit chain: once an attacker
+    captures the operator bearer token (via the Swagger base-URL hijack or XSS
+    path established by Steps 1 and 2), they replay it here and obtain the
+    protected response, completing the unauth-to-authed data-access chain.
+
+    HTTP 401 is returned for any missing, malformed, or incorrect token.
+    HTTP 200 + a sentinel payload is returned for the correct token.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    token = auth_header[len("Bearer "):]
+    if token != _OPERATOR_TOKEN:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({"secret": _CHAIN_SECRET})
 
 
 # ── CORS-protected sub-app (poc_11 target) ───────────────────────────────────

