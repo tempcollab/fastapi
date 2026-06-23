@@ -12,7 +12,7 @@
 
 This audit examined the `tempcollab/fastapi` fork (pinned commit 202b2d2) to determine whether it contains planted backdoors, supply-chain substitutions, or critical exploitable vulnerabilities. The audit found **no planted critical vulnerability, no code-level modification from upstream, and no supply-chain tampering.** The `fastapi/` Python package tree is byte-for-byte identical to the official upstream PyPI release 0.137.1. The dependency lockfile (uv.lock) was verified against PyPI hashes for all differing pins, with zero mismatches. The `fastar` dependency that triggered OSV advisory MAL-2026-4750 is a genuine upstream FastAPI dependency; that advisory was withdrawn as a false positive (OSSF PR #1276).
 
-However, **three genuine inherited vulnerabilities were confirmed** — two under the documented FastAPI "Behind a Proxy" deployment pattern (where a reverse proxy or ASGI middleware maps `X-Forwarded-Prefix` into `scope["root_path"]`), and one that fires without any proxy:
+However, **four genuine inherited vulnerabilities were confirmed** — two under the documented FastAPI "Behind a Proxy" deployment pattern (where a reverse proxy or ASGI middleware maps `X-Forwarded-Prefix` into `scope["root_path"]`), one that fires without any proxy, and one that is a semantic framework asymmetry:
 
 1. **Reflected XSS in Swagger UI `/docs`** (`fastapi/openapi/docs.py:168`): `openapi_url` is interpolated raw into a single-quoted JavaScript string literal with no escaping. An unauthenticated attacker can break out of the JS string and inject arbitrary script. This is **HIGH (conditional)**, comparable to cadwyn advisory GHSA-2gxp-6r36-m97r (CVSS 7.6 HIGH), and is **CONFIRMED (live, poc_07, round 6)**.
 
@@ -20,9 +20,11 @@ However, **three genuine inherited vulnerabilities were confirmed** — two unde
 
 3. **Host-header injection → open redirect via `redirect_slashes`** (`starlette/routing.py:706`): the `Host:` request header flows unvalidated into the `Location` response header when FastAPI's default `redirect_slashes=True` issues a trailing-slash redirect. No proxy needed for the redirect itself; meaningful exploitation (cache poisoning / password-reset-link poisoning / phishing pivot) additionally requires an upstream cache or proxy that forwards an arbitrary `Host` to the origin. This is **LOW-to-MEDIUM (conditional)** and is **CONFIRMED (live, poc_09, round 9 — re-finalized round 10)**.
 
-All three weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
+4. **multipart `max_part_size` not enforced on file parts** (`starlette/formparsers.py:183-188`): the `max_part_size` limit (default 1 MiB) is enforced only for non-file form fields; parts carrying `filename=` (file parts, surfaced as `UploadFile`) are streamed without any per-part size ceiling into a `SpooledTemporaryFile` that spills to disk past 1 MiB. This is **LOW (conditional)** and is **CONFIRMED (live, poc_10, round 12)**.
 
-**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 3 findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect), all upstream-inherited. Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`).
+All four weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
+
+**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 4 findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry), all upstream-inherited. Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap.
 
 ---
 
@@ -35,7 +37,7 @@ All three weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / St
 - `.github/workflows/` — CI pipeline action pinning
 - `.pre-commit-config.yaml` — pre-commit hook SHA verification
 - `fastar` 0.11.0 package — provenance, binary static analysis, OSV advisory status
-- Live behavioral verification via `autofyn_audit/` harness (9 PoCs)
+- Live behavioral verification via `autofyn_audit/` harness (10 PoCs)
 
 **Out of scope:**
 - Application code deployed on top of FastAPI (none supplied; harness uses a minimal test app)
@@ -57,7 +59,7 @@ All three weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / St
 
 **fastar static analysis:** Extracted the `fastar-0.11.0` wheel; scanned the compiled `.so` binary for malicious indicators (hardcoded URLs, IPs, credential paths, network socket calls, base64 blobs, subprocess/eval/exec strings). Verified the CycloneDX SBOM lists only expected Rust crates (tar, flate2, zstd, pyo3). Verified OSV MAL-2026-4750 status: withdrawn as false positive via OSSF PR #1276.
 
-**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09). Nine PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, and poc_09 are finding checks (FAIL = attack succeeded = confirmed finding).
+**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09 and `/upload` added for poc_10). Ten PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, and poc_10 are finding checks (FAIL = attack succeeded = confirmed finding).
 
 ---
 
@@ -77,8 +79,9 @@ All three weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / St
 | 10 | Reflected XSS in Swagger UI /docs via unescaped openapi_url (X-Forwarded-Prefix → root_path) | XSS (reflected) | HIGH (conditional on proxy-prefix handling) | FAIL — openapi_url interpolated raw into single-quoted JS string at docs.py:168; X-Forwarded-Prefix header breaks out; CONFIRMED (live, poc_07, round 6) |
 | 11 | OpenAPI `servers` URL injection via `X-Forwarded-Prefix` → root_path (`/openapi.json`) | Server-URL hijack / open redirect of API traffic | MEDIUM (conditional on proxy-prefix handling) | FAIL — attacker host injected as first `servers[].url` at applications.py:1114; Swagger "Try it out"/authorized calls redirected to attacker; CONFIRMED (live, poc_08, round 7) |
 | 12 | Host-header injection → open redirect via `redirect_slashes` (`/items` → `/items/`) | Open redirect / Host-header injection | LOW-to-MEDIUM (conditional) | FAIL — Host header flows unvalidated into Location netloc at starlette/routing.py:706; enabled by FastAPI default redirect_slashes=True; CONFIRMED (live, poc_09, round 9 — re-finalized round 10) |
+| 13 | multipart `max_part_size` not enforced on file parts (`/upload` UploadFile endpoint) | Resource DoS / semantic size-cap asymmetry | LOW (conditional) | FAIL — max_part_size enforced for form fields only; 2MiB file part accepted in full (received_bytes=2097152) while same payload as a field part is rejected 4xx; sink: formparsers.py:183-188; CONFIRMED (live, poc_10, round 12) |
 
-**Three conditional findings (rows 10–12); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** All three findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`).
+**Four conditional findings (rows 10–13); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** All four findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap.
 
 ---
 
@@ -463,6 +466,126 @@ Per audit goal, NO fix is applied to the framework.
 
 ---
 
+## 6c. Finding — multipart `max_part_size` not enforced on file parts
+
+**Status:** CONFIRMED (live, poc_10, round 12).
+
+**Finding (LOW, upstream-inherited): multipart `max_part_size` not enforced on file parts.**
+Starlette's `MultiPartParser.on_part_data` (`starlette/formparsers.py:183-188`) enforces the `max_part_size` limit (default 1 MiB) only for non-file form fields; parts carrying a `filename=` in their Content-Disposition (file parts, surfaced to FastAPI as `UploadFile`) are streamed without any per-part size limit into a `SpooledTemporaryFile` that spills to disk past 1 MiB. An identical oversized payload sent as a plain form field is rejected ("Part exceeded maximum size of 1024KB"), but the same bytes sent as a file part are accepted in full. This is a disk/IO resource-exhaustion (DoS) vector.
+
+### Severity
+
+**LOW.** No RCE, data disclosure, or auth bypass. "Uploads are unbounded by default; the application or reverse proxy must cap them" is broadly by-design across web frameworks — the specific reportable issue here is the **semantic asymmetry**: a parameter named `max_part_size` silently does not apply to the part that dominates resource use (the file). This mirrors the class of "configured form limits silently ignored" that starlette itself fixed for urlencoded bodies in CVE-2026-54283 (fixed in starlette 1.3.1, present in this version).
+
+### Location
+
+- **Sink:** `starlette/formparsers.py:183-188` (`on_part_data`):
+
+  ```python
+  if self._current_part.file is None:             # NON-FILE field part
+      if len(...) + len(message_bytes) > self.max_part_size:
+          raise MultiPartException(...)           # enforced
+      self._current_part.data.extend(message_bytes)
+  else:                                            # FILE part (filename= present)
+      self._file_parts_to_write.append(...)        # NO size check — unbounded
+  ```
+
+- **Spill point:** `formparsers.py:230` — `SpooledTemporaryFile(max_size=spool_max_size)` (spool_max_size = 1 MB at line 147). Past 1 MB the temporary file spills to disk with no ceiling.
+
+- **Default:** `max_part_size = 1024 * 1024` (class-level line 149 and ctor default line 159). FastAPI calls `request.form()` with this default and never raises it for file parts.
+
+- **Count-only caps:** `max_files` / `max_fields` (lines 226-228, 239-241) cap the NUMBER of parts, not their size. They provide no resource-exhaustion protection for a large single file part.
+
+### NOT a `str = Form()` bypass
+
+Filename-spoofing a part aimed at a `str = Form(...)` field does **NOT** silently feed oversized data to the app. Starlette stores an `UploadFile` in `FormData` for that part; FastAPI's `_extract_form_body` does not coerce it (the coercion branches at `utils.py:925-941` require `isinstance(field_info, params.File)`, not `params.Form`); Pydantic rejects an arbitrary `UploadFile` object against `str` annotation → FastAPI returns **HTTP 422** `type=string_type`. Only genuine `UploadFile` / `bytes = File()` / raw `request.form()` endpoints exhibit the unbounded spool.
+
+### Precondition (stated prominently — do NOT overstate)
+
+**Exploitable only when:**
+1. The app exposes an `UploadFile` / `bytes = File()` / raw `request.form()` endpoint — extremely common pattern.
+2. No upstream proxy body-size cap (e.g. nginx `client_max_body_size`) is in place.
+
+Attacker also needs bandwidth to stream the body. No special headers or middleware required beyond these conditions.
+
+### Independence from poc_07/poc_08/poc_09
+
+| Dimension | poc_07 (XSS) | poc_08 (servers) | poc_09 (open redirect) | poc_10 (size DoS) |
+|-----------|-------------|-----------------|----------------------|------------------|
+| Source | X-Forwarded-Prefix header | X-Forwarded-Prefix header | Host header | request body file part |
+| Sink | docs.py:168 | applications.py:1114 | routing.py:706 | formparsers.py:188 |
+| Attack class | Reflected XSS | API base-URL hijack | Open redirect | Disk/IO resource DoS |
+| Fix-orthogonal | escape root_path in docs.py | validate root_path scheme | TrustedHostMiddleware | size ceil file parts in on_part_data |
+
+**Fully independent:** distinct source, distinct sink, distinct attack class, fix-orthogonal in all directions. No shared source with any prior PoC.
+
+### Data Flow
+
+```
+POST /upload — multipart/form-data
+  part with Content-Disposition: form-data; name="file"; filename="x"
+    → starlette/formparsers.py:225 — on_headers_finished: b"filename" in options
+    → self._current_part.file = UploadFile(file=SpooledTemporaryFile(max_size=1MB))
+    → on_part_data (line 181): message bytes arrive
+    → line 183: self._current_part.file is NOT None → else-branch
+    → line 188: _file_parts_to_write.append(...) — NO max_part_size check
+    → SpooledTemporaryFile spills to disk past 1MB — no ceiling
+    → FastAPI /upload: await file.read() → full body; {"received_bytes": N}
+```
+
+### Live Evidence (poc_10, round 12)
+
+- Teeth-test: POST 2MiB as a NON-FILE field part → HTTP 4xx ("Part exceeded maximum size of 1024KB" — cap confirmed active).
+- Exploit: POST same 2MiB as a FILE part (filename=x) → HTTP 200 `{"received_bytes":2097152}` — full body materialized, no size enforcement.
+- `poc_10` emits `multipart_filepart_size_uncapped :: FAIL`.
+- Full harness: `run_all.sh` = **6 PASS** (poc_01–06) + **5 FAIL** (swagger_openapi_url_xss, redoc_openapi_url_xss, openapi_servers_url_injection, host_header_open_redirect, multipart_filepart_size_uncapped). No regression.
+
+### Upstream Parity — Inherited, Not Fork-Planted
+
+`starlette/formparsers.py` is the installed Starlette 1.3.1 code (not modified by this fork). The asymmetry persists in current upstream `encode/starlette` master. This weakness is **inherited from upstream Starlette** and is not evidence of a malicious fork modification. Per audit goal, no fix is applied.
+
+### Reproduction Steps
+
+```bash
+# 1. Start the audit container
+bash autofyn_audit/setup.sh
+
+# 2. Teeth-test — 2MiB field part (no filename=) is rejected
+python3 -c "import sys; sys.stdout.buffer.write(b'A' * 2097152)" > /tmp/poc10_payload.bin
+printf -- '--BOUND\r\nContent-Disposition: form-data; name="file"\r\n\r\n' > /tmp/poc10_field.bin
+cat /tmp/poc10_payload.bin >> /tmp/poc10_field.bin
+printf '\r\n--BOUND--\r\n' >> /tmp/poc10_field.bin
+curl -sS -X POST -H "Content-Type: multipart/form-data; boundary=BOUND" \
+    --data-binary @/tmp/poc10_field.bin -w "\nHTTP %{http_code}\n" \
+    http://127.0.0.1:8137/upload
+# Expected: HTTP 400; body contains "Part exceeded maximum size of 1024KB"
+
+# 3. Exploit — same 2MiB as file part (filename=x) is accepted
+printf -- '--BOUND\r\nContent-Disposition: form-data; name="file"; filename="x"\r\nContent-Type: application/octet-stream\r\n\r\n' > /tmp/poc10_file.bin
+cat /tmp/poc10_payload.bin >> /tmp/poc10_file.bin
+printf '\r\n--BOUND--\r\n' >> /tmp/poc10_file.bin
+curl -sS -X POST -H "Content-Type: multipart/form-data; boundary=BOUND" \
+    --data-binary @/tmp/poc10_file.bin -w "\nHTTP %{http_code}\n" \
+    http://127.0.0.1:8137/upload
+# Expected: HTTP 200; {"received_bytes":2097152}
+
+# 4. Run poc_10 via run_all.sh (or directly)
+bash autofyn_audit/run_all.sh
+# poc_10 emits:
+#   [[ AUDIT-RESULT ]] multipart_filepart_size_uncapped :: FAIL :: max_part_size enforced ...
+```
+
+### Remediation (audit-only observation — do NOT apply fix per goal constraints)
+
+**Recommended fix for upstream / operators:**
+
+1. Apply a size ceiling to file parts in `on_part_data` (the `else` branch at line 187) — add an analogous `max_part_size` check or introduce a dedicated `max_file_size` parameter to `MultiPartParser`.
+2. Alternatively, cap the upload size at the **app layer** (read file in bounded chunks, reject above threshold) or at the **proxy layer** (nginx `client_max_body_size`, AWS ALB / CloudFront `max-body-size`, etc.).
+
+Per audit goal, NO fix is applied to the framework.
+
+---
+
 ## 7. Supply-Chain Hash-Match Evidence
 
 The following table shows the explorer-verified sdist sha256 values from the round-3 supply-chain analysis: hashes were queried against `https://pypi.org/pypi/<pkg>/<ver>/json` and cross-checked against the `sdist = { hash = "sha256:..." }` entries recorded in `uv.lock` at `/src/fastapi-fork/uv.lock`. Of the 246 packages in uv.lock, all 245 registry sources resolve to `registry = "https://pypi.org/simple"` (the 246th, `fastapi`, is the editable repo under audit, `source = { editable = "." }`); all artifact download URLs point exclusively to `https://files.pythonhosted.org/`. Only the five most-flagged packages were hash-verified individually — confirming representative integrity; the remaining packages were verified at the source/URL level (no git+, file://, or non-pythonhosted.org sources). poc_05 re-confirms these entries at run time by parsing uv.lock inside the live container with `tomllib`.
@@ -496,7 +619,7 @@ Hashes verified by the round-3 explorer against `https://pypi.org/pypi/<pkg>/<ve
 # 1. Build and start the audit container (binds to 127.0.0.1:8137 only)
 bash autofyn_audit/setup.sh
 
-# 2. Run all 9 PoC scripts against the live container
+# 2. Run all 10 PoC scripts against the live container
 bash autofyn_audit/run_all.sh
 
 # 3. Tear down the audit container and network
@@ -522,9 +645,9 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 ```
 
 **PASS** means the framework's defense held (attack blocked) or the benign expected state was confirmed.
-**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, and poc_09: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output for all three).
+**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, poc_09, and poc_10: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output for all four).
 
-`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **4 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection).
+`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **5 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection, poc_10 `multipart_filepart_size_uncapped` = confirmed max_part_size asymmetry for file parts).
 
 ### Pinned references
 
@@ -540,13 +663,17 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 
 **No fork-planted backdoor or supply-chain tampering was found.** No injected malicious code, no supply-chain substitution, and no exploitable deviation from upstream FastAPI 0.137.1's source was introduced by this fork. The fastapi/ package tree is byte-identical; the supply-chain has been independently hash-verified (poc_05). These true-negative conclusions stand.
 
-**Two genuine (upstream-inherited) vulnerabilities under the same proxy-prefix precondition ARE confirmed:**
+**Four genuine (upstream-inherited) vulnerabilities ARE confirmed:**
 
 1. **Reflected XSS in `/docs`** (CONFIRMED, poc_07, round 6): HIGH (conditional), `docs.py:168`, `openapi_url` unescaped in single-quoted JS string — JS string breakout under proxy-prefix. Remediation: escape through `_html_safe_json` at `docs.py:168` (see §6).
 
 2. **OpenAPI `servers` URL injection at `/openapi.json`** (CONFIRMED, poc_08, round 7): MEDIUM (conditional), `applications.py:1114`, attacker host prepended verbatim as first `servers[].url` — Swagger API base-URL hijack redirecting authorized calls to the attacker. Remediation: validate `root_path` to path-only form before placing it in `servers[].url` (see §6a).
 
-Both are upstream-inherited, not fork-planted, and require the documented "Behind a Proxy" deployment (a proxy/middleware maps `X-Forwarded-Prefix` into `root_path`). Default uvicorn-without-proxy is not exploitable for either.
+3. **Host-header injection → open redirect via `redirect_slashes`** (CONFIRMED, poc_09, round 9): LOW-to-MEDIUM (conditional), `starlette/routing.py:706`, Host header reflected into Location netloc — open redirect, cache/link poisoning. Remediation: `TrustedHostMiddleware` or `redirect_slashes=False` (see §6b).
+
+4. **multipart `max_part_size` not enforced on file parts** (CONFIRMED, poc_10, round 12): LOW (conditional), `starlette/formparsers.py:183-188`, file parts bypass the 1 MiB cap and spool unbounded to disk — disk/IO resource DoS. NOT a `str=Form()` bypass (FastAPI returns 422 in that case). Remediation: apply a size ceiling to file parts in `on_part_data`, or cap at app/proxy layer (see §6c).
+
+Findings 1 and 2 are upstream-inherited, not fork-planted, and require the documented "Behind a Proxy" deployment (a proxy/middleware maps `X-Forwarded-Prefix` into `root_path`). Default uvicorn-without-proxy is not exploitable for either. Finding 3 requires only a trailing-slash route and default `redirect_slashes=True`. Finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap.
 
 **Standard hardening notes** (applicable to any production FastAPI deployment; not fork-specific findings unless noted):
 

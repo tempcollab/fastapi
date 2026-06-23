@@ -12,6 +12,9 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /items/      — Collection route registered WITH trailing slash (poc_09 target:
                  requesting /items triggers redirect_slashes redirect whose Location
                  netloc is taken from the Host header — starlette/routing.py:695-706)
+  /upload      — UploadFile endpoint (poc_10 target: demonstrates that max_part_size
+                 is enforced for form fields but NOT for file parts in starlette's
+                 MultiPartParser — formparsers.py:183-188)
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
@@ -25,7 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, MutableMapping
 
 import fastapi
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -127,6 +130,27 @@ async def items() -> JSONResponse:
     forge the Host header poc_09 uses).
     """
     return JSONResponse({"items": []})
+
+
+@_fastapi_app.post("/upload")
+async def upload(file: UploadFile = File(...)) -> JSONResponse:
+    """Idiomatic UploadFile endpoint; demonstrates framework gap that max_part_size
+    is not applied to file parts (poc_10). The app does not, and per framework design
+    cannot via this param, cap the file size.
+
+    Starlette's MultiPartParser.on_part_data (formparsers.py:183-188) enforces
+    max_part_size only for non-file (field) parts; file parts — those carrying a
+    filename= in their Content-Disposition — are written to a SpooledTemporaryFile
+    with no per-part size ceiling. The same 2MiB payload sent as a field is rejected
+    with "Part exceeded maximum size of 1024KB"; sent as a file part it is accepted
+    in full. This is the semantic asymmetry confirmed by poc_10.
+
+    This endpoint sends and receives no special headers and does NOT touch the
+    X-Forwarded-Prefix / root_path path (poc_07/08) or the Host-header/redirect_slashes
+    path (poc_09). It is fully independent of those PoCs.
+    """
+    content = await file.read()
+    return JSONResponse({"received_bytes": len(content)})
 
 
 # ── Proxy-prefix middleware (PRECONDITION for poc_07) ─────────────────────────
