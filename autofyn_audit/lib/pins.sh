@@ -29,3 +29,11 @@ AUDIT_HOST_PORT="${AUDIT_HOST_PORT:-8137}"
 
 # Health-check timeout in seconds (overridable via env)
 AUDIT_HEALTH_TIMEOUT="${AUDIT_HEALTH_TIMEOUT:-90}"
+
+# ── poc_14 browser sidecar pins ───────────────────────────────────────────────
+# Pinned playwright image — pull by digest for reproducibility.
+PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v1.49.0-noble"
+PLAYWRIGHT_IMAGE_DIGEST="sha256:0fc07c73230cb7c376a528d7ffc83c4bdcdcd3fc7efbe54a2eed72b1ec118377"
+PLAYWRIGHT_VERSION="1.49.0"
+# Sidecar name used by poc_14; NEVER touch protected containers.
+BROWSER_SIDECAR_NAME="autofyn-audit-browser-sidecar"

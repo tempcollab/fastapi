@@ -42,6 +42,23 @@ HARNESS_FAILED=0
 
 for poc_script in "${POCS_DIR}"/poc_*.sh; do
     poc_name="$(basename "$poc_script" .sh)"
+
+    # poc_14 is the browser-driven PoC and requires Docker + a browser sidecar.
+    # It is NOT part of this curl-only harness and must NOT change the
+    # "6 PASS + 8 FAIL" tally.  Run it separately:
+    #   bash autofyn_audit/pocs/poc_14_cors_exfil_browser.sh <BASE_URL>
+    # (BASE_URL must be reachable from inside the Docker network, e.g.
+    #  http://autofyn-audit-target:8000 — NOT a loopback address)
+    case "${poc_name}" in
+        poc_14_*)
+            echo "──────────────────────────────────────────────────"
+            echo "Skipping: ${poc_name}  (browser-driven; run separately — see header comment)"
+            echo "──────────────────────────────────────────────────"
+            echo ""
+            continue
+            ;;
+    esac
+
     echo "──────────────────────────────────────────────────"
     echo "Running: ${poc_name}"
     echo "──────────────────────────────────────────────────"

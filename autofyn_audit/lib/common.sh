@@ -14,6 +14,9 @@
 # Guard: ONLY our exact pinned resource names may be operated on.
 # Call this before any docker command that references a container/network/image.
 _ALLOWED_CONTAINER="autofyn-audit-target"
+# poc_14 browser sidecar — allowed as a SECOND named constant, NOT a prefix glob.
+# A prefix glob (autofyn-audit-*) would weaken the guard for protected containers.
+_ALLOWED_BROWSER_SIDECAR="autofyn-audit-browser-sidecar"
 _ALLOWED_NETWORK="autofyn-audit-net"
 _ALLOWED_IMAGE_PREFIX="autofyn-audit-fastapi:"
 
@@ -22,8 +25,8 @@ assert_safe_resource_name() {
     local name="$2"
     case "$kind" in
         container)
-            if [[ "$name" != "$_ALLOWED_CONTAINER" ]]; then
-                log_err "SAFETY GUARD: refusing to operate on container '$name' (allowed: '$_ALLOWED_CONTAINER')"
+            if [[ "$name" != "$_ALLOWED_CONTAINER" && "$name" != "$_ALLOWED_BROWSER_SIDECAR" ]]; then
+                log_err "SAFETY GUARD: refusing to operate on container '$name' (allowed: '$_ALLOWED_CONTAINER' or '$_ALLOWED_BROWSER_SIDECAR')"
                 exit 2
             fi
             ;;

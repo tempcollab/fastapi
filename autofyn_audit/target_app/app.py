@@ -18,9 +18,17 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /cors-protected — isolated sub-app with CORSMiddleware(allow_origins=["*"],
                  allow_credentials=True): Starlette reflects attacker Origin into
                  ACAO + ACAC:true (poc_11 target, cors.py:166-178).
+  /cors-protected/login  — Sets SameSite=None; Secure session cookie (poc_14 target:
+                 makes the cross-site cookie precondition a REAL, observable property
+                 of the target; also allows browser to establish the session itself).
   /protected   — Token-gated endpoint (poc_12 chain terminus): returns a sentinel
                  secret ONLY when Authorization: Bearer <OPERATOR_TOKEN> is correct;
                  models the "authenticated data" the chain steals access to.
+  /no-cors-here — Negative-control endpoint for poc_14: session-cookie-gated,
+                 structurally identical to /cors-protected/whoami, but served by
+                 _fastapi_app (NO CORSMiddleware). Browser SOP blocks cross-origin
+                 reads from attacker-origin JS — proves the positive read is caused
+                 by the CORS reflection, not by a permissive harness.
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
@@ -69,6 +77,12 @@ _CHAIN_SECRET = "AUTOFYN_CHAIN_PROTECTED_SECRET"
 # that would be serialised into /openapi.json or /cors-protected/openapi.json.
 _VICTIM_SESSION = "AUTOFYN_VICTIM_SESSION_b41d2e"
 _CORS_EXFIL_SECRET = "AUTOFYN_CORS_EXFIL_SECRET"
+
+# ── poc_14 negative-control constant ─────────────────────────────────────────
+# Used ONLY for the /no-cors-here endpoint (poc_14 negative-control target).
+# DISTINCT from all prior markers.  This string does NOT appear in any docstring
+# or summary/description, so it cannot appear in /openapi.json.
+_NOCORS_CONTROL_SECRET = "AUTOFYN_NOCORS_CONTROL_SECRET"
 
 _fastapi_app = FastAPI(title="autofyn-audit-target", version="0.0.1")
 
@@ -208,6 +222,29 @@ async def protected(request: Request) -> JSONResponse:
     return JSONResponse({"secret": _CHAIN_SECRET})
 
 
+@_fastapi_app.get("/no-cors-here")
+async def no_cors_here(request: Request) -> JSONResponse:
+    """poc_14 negative-control endpoint.
+
+    Structurally identical to /cors-protected/whoami (session-cookie-gated,
+    same _VICTIM_SESSION constant, 401 without cookie, 200+secret with cookie)
+    BUT served by _fastapi_app, which has NO CORSMiddleware. A cross-origin
+    fetch from attacker-origin JS is therefore BLOCKED by the browser SOP —
+    no Access-Control-Allow-Origin header is emitted regardless of Origin.
+
+    This proves the positive read in poc_14 is caused specifically by the CORS
+    reflection, not by a permissive harness. The negative control must throw a
+    TypeError in the browser when attacker JS tries to read it cross-origin.
+
+    NOTE: the marker string is kept out of this docstring to prevent it from
+    appearing in /openapi.json and tripping any other PoC teeth-test.
+    """
+    session_cookie = request.cookies.get("session")
+    if session_cookie != _VICTIM_SESSION:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({"data": _NOCORS_CONTROL_SECRET})
+
+
 # ── CORS-protected sub-app (poc_11 target) ───────────────────────────────────
 #
 # A SEPARATE FastAPI sub-app whose ONLY purpose is to demonstrate the Starlette
@@ -268,6 +305,35 @@ async def cors_whoami(request: Request) -> JSONResponse:
     if session_cookie != _VICTIM_SESSION:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse({"data": _CORS_EXFIL_SECRET})
+
+
+@_cors_subapp.get("/login")
+async def cors_login() -> JSONResponse:
+    """poc_14 login route — sets the session cookie with SameSite=None; Secure.
+
+    This route makes the SameSite=None; Secure cross-site cookie precondition
+    a REAL, observable property of the target application (not just an assumption).
+    A reviewer can curl -D - this endpoint and verify the Set-Cookie attributes
+    directly against the target.
+
+    The browser driver (browser_exfil.js Option A) navigates here first so the
+    browser receives the real Set-Cookie and stores it in its own cookie jar,
+    faithfully modeling a victim who logged in earlier.
+
+    NOTE: no secret marker in this docstring or body; the session value constant
+    is referenced only as _VICTIM_SESSION which is defined at module level and
+    does not appear in the serialized /cors-protected/openapi.json schema.
+    """
+    response = JSONResponse({"status": "logged-in"})
+    response.set_cookie(
+        key="session",
+        value=_VICTIM_SESSION,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+    return response
 
 
 _fastapi_app.mount(
