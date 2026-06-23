@@ -131,7 +131,7 @@ if ! assert_contains "${ATK_BODY}" "AUTOFYNXSS"; then
     echo "        The ProxyPrefixMiddleware precondition is not satisfied."
     echo "        This is a harness/configuration failure — NOT a defense pass."
     print_check "swagger_openapi_url_xss" "FAIL" \
-        "X-Forwarded-Prefix not reflected into root_path — middleware precondition not satisfied; cannot confirm or deny XSS"
+        "X-Forwarded-Prefix not reflected into root_path — middleware precondition not satisfied"
     exit 0
 fi
 

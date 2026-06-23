@@ -12,7 +12,7 @@
 
 This audit examined the `tempcollab/fastapi` fork (pinned commit 202b2d2) to determine whether it contains planted backdoors, supply-chain substitutions, or critical exploitable vulnerabilities. The audit found **no planted critical vulnerability, no code-level modification from upstream, and no supply-chain tampering.** The `fastapi/` Python package tree is byte-for-byte identical to the official upstream PyPI release 0.137.1. The dependency lockfile (uv.lock) was verified against PyPI hashes for all differing pins, with zero mismatches. The `fastar` dependency that triggered OSV advisory MAL-2026-4750 is a genuine upstream FastAPI dependency; that advisory was withdrawn as a false positive (OSSF PR #1276).
 
-However, **a genuine reflected-XSS exists in the Swagger UI `/docs` endpoint** (`fastapi/openapi/docs.py:168`): `openapi_url` is interpolated raw into a single-quoted JavaScript string literal with no escaping. Under the documented FastAPI "Behind a Proxy" deployment pattern — where a reverse proxy or ASGI middleware maps the `X-Forwarded-Prefix` request header into `scope["root_path"]` — an unauthenticated attacker can break out of the JS string and inject arbitrary script into `/docs`. This weakness is **inherited verbatim from upstream FastAPI 0.137.1** (not a fork-planted backdoor), is comparable to cadwyn advisory GHSA-2gxp-6r36-m97r (CVSS 7.6 HIGH), and is reproducibly confirmed by poc_07 (status: **NEEDS-LIVE-CONFIRMATION** — reviewer to run live and flip status to CONFIRMED).
+However, **a genuine reflected-XSS exists in the Swagger UI `/docs` endpoint** (`fastapi/openapi/docs.py:168`): `openapi_url` is interpolated raw into a single-quoted JavaScript string literal with no escaping. Under the documented FastAPI "Behind a Proxy" deployment pattern — where a reverse proxy or ASGI middleware maps the `X-Forwarded-Prefix` request header into `scope["root_path"]` — an unauthenticated attacker can break out of the JS string and inject arbitrary script into `/docs`. This weakness is **inherited verbatim from upstream FastAPI 0.137.1** (not a fork-planted backdoor), is comparable to cadwyn advisory GHSA-2gxp-6r36-m97r (CVSS 7.6 HIGH), and is **CONFIRMED (live, poc_07, round 6)** — reproduced against a live container built from pinned commit 202b2d2.
 
 **Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 1 new reflected-XSS finding confirmed (conditional-HIGH, upstream-inherited, proxy-prefix precondition required).
 
@@ -66,7 +66,7 @@ However, **a genuine reflected-XSS exists in the Swagger UI `/docs` endpoint** (
 | 7 | Jinja2 SSTI / XSS via `/greet?name=` | SSTI / XSS | High | PASS — autoescape on; no expression evaluated; XSS payload HTML-escaped |
 | 8 | CRLF / header injection via `/redirect?url=` | Header injection | High | PASS — Starlette encoding + uvicorn/h11 validation blocks injection |
 | 9 | Installed package versions (fastar, fastapi) | Pin integrity | Medium | PASS — live container matches audited pins |
-| 10 | Reflected XSS in Swagger UI /docs via unescaped openapi_url (X-Forwarded-Prefix → root_path) | XSS (reflected) | HIGH (conditional on proxy-prefix handling) | FAIL — openapi_url interpolated raw into single-quoted JS string at docs.py:168; X-Forwarded-Prefix header breaks out; NEEDS-LIVE-CONFIRMATION (poc_07 authored; reviewer to confirm live) |
+| 10 | Reflected XSS in Swagger UI /docs via unescaped openapi_url (X-Forwarded-Prefix → root_path) | XSS (reflected) | HIGH (conditional on proxy-prefix handling) | FAIL — openapi_url interpolated raw into single-quoted JS string at docs.py:168; X-Forwarded-Prefix header breaks out; CONFIRMED (live, poc_07, round 6) |
 
 **One HIGH (conditional) reflected-XSS finding (row 10); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** The finding is upstream-inherited (not fork-planted) and requires the proxy-prefix deployment precondition to be exploitable.
 
@@ -94,7 +94,9 @@ However, **a genuine reflected-XSS exists in the Swagger UI `/docs` endpoint** (
 
 ## 6. Finding — Reflected XSS in Swagger UI `/docs` (unescaped `openapi_url`)
 
-**Status:** NEEDS-LIVE-CONFIRMATION (poc_07 authored; reviewer to run `bash autofyn_audit/run_all.sh` against a live container and flip status to CONFIRMED after observing the FAIL).
+**Status:** CONFIRMED (live, poc_07, round 6).
+
+**Live confirmation evidence (round 6, reviewer):** Built image `autofyn-audit-fastapi:202b2d2` (local image id sha256:3812c986c4e1) from pinned commit 202b2d2 via `setup.sh`; container `autofyn-audit-target` reported `fastapi_version == 0.137.1` at `/health`. `bash autofyn_audit/run_all.sh` produced **6 PASS, 2 FAIL** — poc_01–06 (defenses/supply-chain) all PASS (no regression from the new ProxyPrefixMiddleware); `swagger_openapi_url_xss :: FAIL` and `redoc_openapi_url_xss :: FAIL`. Independent manual curl confirmed: `curl -H "X-Forwarded-Prefix: /x'-AUTOFYNXSS-'" .../docs` renders `url: '/x'-AUTOFYNXSS-'/openapi.json',` (raw single-quote breakout, unescaped) and also `oauth2RedirectUrl: window.location.origin + '/x'-AUTOFYNXSS-'/docs/oauth2-redirect',` (secondary sink). Teeth-tests: the SAME request with NO `X-Forwarded-Prefix` header yields a clean `url: '/openapi.json',` with zero marker occurrences (reflection is strictly header-driven); the same header against `/health` produces no marker (finding scoped to the swagger HTML sinks); against `/openapi.json` the value is reflected only inside a double-quoted JSON string under `Content-Type: application/json` (not an executable XSS context). Confirms the finding is real, non-vacuous, and correctly scoped.
 
 ### Severity
 
@@ -279,7 +281,7 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 
 **No fork-planted backdoor or supply-chain tampering was found.** No injected malicious code, no supply-chain substitution, and no exploitable deviation from upstream FastAPI 0.137.1's source was introduced by this fork. The fastapi/ package tree is byte-identical; the supply-chain has been independently hash-verified (poc_05). These true-negative conclusions stand.
 
-**One genuine (upstream-inherited) reflected-XSS in the Swagger UI `/docs` endpoint IS confirmed** (status: NEEDS-LIVE-CONFIRMATION — reviewer to flip after live run). This is a HIGH (conditional) finding: exploitable in the documented "Behind a Proxy" deployment pattern via the `X-Forwarded-Prefix` → `root_path` path, not in a bare default uvicorn deployment. It is not a fork-planted backdoor — it is an upstream weakness present in the audited artifact. Remediation: escape `openapi_url` through `_html_safe_json` at `docs.py:168` (see §6).
+**One genuine (upstream-inherited) reflected-XSS in the Swagger UI `/docs` endpoint IS confirmed** (status: CONFIRMED (live, poc_07, round 6) — reproduced against a live container). This is a HIGH (conditional) finding: exploitable in the documented "Behind a Proxy" deployment pattern via the `X-Forwarded-Prefix` → `root_path` path, not in a bare default uvicorn deployment. It is not a fork-planted backdoor — it is an upstream weakness present in the audited artifact. Remediation: escape `openapi_url` through `_html_safe_json` at `docs.py:168` (see §6).
 
 **Standard hardening notes** (applicable to any production FastAPI deployment; not fork-specific findings unless noted):
 
