@@ -57,6 +57,19 @@ _HERE = Path(__file__).parent
 _OPERATOR_TOKEN = "AUTOFYN_OPERATOR_TOKEN_7f3a9c"
 _CHAIN_SECRET = "AUTOFYN_CHAIN_PROTECTED_SECRET"
 
+# ── poc_13 Chain B constants ──────────────────────────────────────────────────
+# These constants are used ONLY for the /cors-protected/whoami endpoint
+# (poc_13 Chain B target).  Markers are DISTINCT from all prior PoCs:
+#   - AUTOFYN_VICTIM_SESSION_b41d2e: distinct from _OPERATOR_TOKEN and all other
+#     credential constants; never appears in any docstring or /openapi.json path.
+#   - AUTOFYN_CORS_EXFIL_SECRET: distinct from AUTOFYN_CORS_SENTINEL (poc_11),
+#     AUTOFYN_CHAIN_PROTECTED_SECRET (poc_12), AUTOFYNXSS (poc_07), and all other
+#     marker strings used by prior PoC teeth-tests.
+# ISOLATION: these strings do NOT appear in any docstring or summary/description
+# that would be serialised into /openapi.json or /cors-protected/openapi.json.
+_VICTIM_SESSION = "AUTOFYN_VICTIM_SESSION_b41d2e"
+_CORS_EXFIL_SECRET = "AUTOFYN_CORS_EXFIL_SECRET"
+
 _fastapi_app = FastAPI(title="autofyn-audit-target", version="0.0.1")
 
 # ── Static files ──────────────────────────────────────────────────────────────
@@ -230,6 +243,31 @@ async def cors_protected() -> JSONResponse:
     that CORSMiddleware reflects ANY Origin + ACAC:true, so attacker JS from any
     origin could read this body cross-origin with credentials included."""
     return JSONResponse({"secret": "AUTOFYN_CORS_SENTINEL"})
+
+
+@_cors_subapp.get("/whoami")
+async def cors_whoami(request: Request) -> JSONResponse:
+    """Session-cookie-gated endpoint on the CORS sub-app (poc_13 Chain B target).
+
+    Returns the authenticated data ONLY when the session cookie is present and
+    correct; otherwise returns HTTP 401.  The endpoint is mounted on _cors_subapp
+    and therefore inherits the CORSMiddleware(allow_origins=["*"],
+    allow_credentials=True) configuration, making it subject to the same
+    credentialed-Origin-reflection foot-gun confirmed by poc_11.
+
+    Chain B uses this endpoint to demonstrate that the poc_11 CORS primitive can
+    be used to exfiltrate AUTHENTICATED (cookie-gated) data cross-origin, not just
+    a publicly-readable sentinel — converting the poc_11 observation into an
+    end-to-end data-theft chain.
+
+    NOTE: the endpoint summary/description is deliberately free of the session
+    credential value and the response secret marker so that they cannot appear in
+    /cors-protected/openapi.json and trip other PoC teeth-tests.
+    """
+    session_cookie = request.cookies.get("session")
+    if session_cookie != _VICTIM_SESSION:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({"data": _CORS_EXFIL_SECRET})
 
 
 _fastapi_app.mount(

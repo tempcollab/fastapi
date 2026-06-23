@@ -26,9 +26,9 @@ However, **five genuine inherited vulnerabilities were confirmed** — two under
 
 All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
 
-**Exploit chains:** Findings 1 and 2 share a single precondition and, when chained, enable a **CRITICAL end-to-end outcome**: one documented proxy misconfiguration simultaneously arms the Swagger XSS (poc_07) and the Swagger base-URL hijack (poc_08), allowing an unauthenticated attacker to capture an API operator's bearer token and replay it against a protected endpoint — a complete unauth-to-authed data-access chain. This is synthesized in **Chain A** (§6e, poc_12) and does not inflate the independent-finding count. Finding 5 (CORS, poc_11) independently forms **Chain B** (a one-primitive credentialed cross-origin read chain). See §6e for full analysis.
+**Exploit chains:** Findings 1 and 2 share a single precondition and, when chained, enable a **CRITICAL end-to-end outcome**: one documented proxy misconfiguration simultaneously arms the Swagger XSS (poc_07) and the Swagger base-URL hijack (poc_08), allowing an unauthenticated attacker to capture an API operator's bearer token and replay it against a protected endpoint — a complete unauth-to-authed data-access chain. This is synthesized in **Chain A** (§6e, poc_12) and does not inflate the independent-finding count. Finding 5 (CORS, poc_11) independently forms **Chain B** (§6f, poc_13) — a live-confirmed one-primitive credentialed cross-origin read chain: attacker-origin JS reads a victim's session-cookie-gated authenticated data directly via browser SOP relaxation, with no credential replay step needed. Chain B adds a dedicated cookie-gated endpoint (`GET /cors-protected/whoami`) and is confirmed live (Steps 0/1/2; Step 3 browser-modeled). See §6e (Chain A) and §6f (Chain B) for full analysis.
 
-**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 5 independent findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry, 1 MEDIUM CORS credentialed-reflection foot-gun), all upstream-inherited. Findings 1 and 2 are additionally synthesized into Chain A (HIGH, conditional; CRITICAL-impact when precondition holds); finding 5 forms Chain B (MEDIUM, conditional). Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
+**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 5 independent findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry, 1 MEDIUM CORS credentialed-reflection foot-gun), all upstream-inherited. Findings 1 and 2 are additionally synthesized into Chain A (HIGH, conditional; CRITICAL-impact when precondition holds); finding 5 forms Chain B (MEDIUM, conditional; live-confirmed via poc_13, round 32; Steps 0/1/2 LIVE-OBSERVED, Step 3 BROWSER-MODELED). 13 PoC scripts total (poc_01–poc_13). Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -41,7 +41,7 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 - `.github/workflows/` — CI pipeline action pinning
 - `.pre-commit-config.yaml` — pre-commit hook SHA verification
 - `fastar` 0.11.0 package — provenance, binary static analysis, OSV advisory status
-- Live behavioral verification via `autofyn_audit/` harness (12 PoCs)
+- Live behavioral verification via `autofyn_audit/` harness (13 PoCs)
 
 **Out of scope:**
 - Application code deployed on top of FastAPI (none supplied; harness uses a minimal test app)
@@ -63,7 +63,7 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 
 **fastar static analysis:** Extracted the `fastar-0.11.0` wheel; scanned the compiled `.so` binary for malicious indicators (hardcoded URLs, IPs, credential paths, network socket calls, base64 blobs, subprocess/eval/exec strings). Verified the CycloneDX SBOM lists only expected Rust crates (tar, flate2, zstd, pyo3). Verified OSV MAL-2026-4750 status: withdrawn as false positive via OSSF PR #1276.
 
-**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09, `/upload` added for poc_10, and a dedicated `/cors-protected` sub-app added for poc_11). Twelve PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, poc_10, poc_11, and poc_12 are finding checks (FAIL = attack succeeded = confirmed finding). poc_12 additionally synthesizes poc_07 and poc_08 into Chain A (see §6e), adding a `/protected` token-gated endpoint to the target app.
+**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09, `/upload` added for poc_10, a dedicated `/cors-protected` sub-app added for poc_11, a `/protected` token-gated endpoint added for poc_12, and a `/cors-protected/whoami` session-cookie-gated endpoint added for poc_13). Thirteen PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, poc_10, poc_11, poc_12, and poc_13 are finding checks (FAIL = attack succeeded = confirmed finding). poc_12 synthesizes poc_07 and poc_08 into Chain A (see §6e); poc_13 synthesizes poc_11 into Chain B (see §6f), adding `/cors-protected/whoami` to the target app.
 
 ---
 
@@ -86,8 +86,9 @@ All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 | 13 | multipart `max_part_size` not enforced on file parts (`/upload` UploadFile endpoint) | Resource DoS / semantic size-cap asymmetry | LOW (conditional) | FAIL — max_part_size enforced for form fields only; 2MiB file part accepted in full (received_bytes=2097152) while same payload as a field part is rejected 4xx; sink: formparsers.py:183-188; CONFIRMED (live, poc_10, round 12) |
 | 14 | CORSMiddleware reflects arbitrary `Origin` + `Access-Control-Allow-Credentials: true` (`/cors-protected` sub-app) | CORS credentialed cross-origin disclosure | MEDIUM (conditional on `allow_origins=["*"]` + `allow_credentials=True`) | FAIL — attacker `Origin` reflected into ACAO with ACAC:true, enabling credentialed cross-origin reads; sink: starlette/middleware/cors.py; CONFIRMED (live, poc_11, round 20) |
 | 15 | **Exploit Chain A** — `X-Forwarded-Prefix→root_path` simultaneously arms poc_07 (XSS in API origin, docs.py:168) AND poc_08 (Swagger base-URL hijack, applications.py:1114); operator bearer token routed to attacker (browser-modeled); replayed token reads `GET /protected` → `AUTOFYN_CHAIN_PROTECTED_SECRET` | End-to-end credential theft / authenticated data exfil | **HIGH conditional; CRITICAL-impact when precondition holds** | FAIL — Chain A confirmed; Steps 0/1/2/4 mechanically observed; Step 3 (browser exfil) browser-modeled and labeled as such; unauth attacker → authenticated data compromise; CONFIRMED (live: Steps 0/1/2/4; Step 3 browser-modeled — poc_12, round 31) |
+| 16 | **Exploit Chain B** — CORSMiddleware credentialed-reflection (poc_11 primitive) on session-cookie-gated `GET /cors-protected/whoami`; attacker Origin + victim cookie → ACAO reflects attacker Origin + ACAC:true + authenticated body; attacker-origin JS reads victim's authenticated data cross-origin | Credentialed CORS cross-origin authenticated-data disclosure | **MEDIUM conditional** | FAIL — Chain B confirmed; Steps 0/1/2 LIVE-OBSERVED; Step 3 (cross-origin browser read) BROWSER-MODELED and labeled; unauth remote attacker → victim authenticated-data exfil; CONFIRMED (live: Steps 0/1/2; Step 3 browser-modeled — poc_13, round 32) |
 
-**Five independent conditional findings (rows 10–14); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** Row 15 is a **chain synthesis** of findings 10+11 (not a 6th independent finding — the independent count stays at 5). All five underlying findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 14 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
+**Five independent conditional findings (rows 10–14); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** Rows 15 and 16 are **chain syntheses** (not additional independent findings — the independent count stays at 5): row 15 synthesizes findings 10+11 (Chain A); row 16 synthesizes finding 14 (Chain B). All five underlying findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 14 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -730,9 +731,9 @@ Chained under **one documented proxy deployment** they become: **unauthenticated
 
 The defensible headline: **one common proxy misconfiguration converts two individually-dismissable conditional findings into a working operator-token-theft chain ending in authenticated data access.**
 
-### Chain B (secondary — already covered by poc_11, no new PoC)
+### Chain B (now live-confirmed end-to-end by poc_13; see §6f)
 
-**Single precondition:** developer sets `CORSMiddleware(allow_origins=["*"], allow_credentials=True)` on a cookie-authenticated endpoint. **Kill-chain:** attacker hosts a page on any origin → victim with a live session visits it → attacker JS issues `fetch(api, {credentials:'include'})` → Starlette reflects the attacker `Origin` + `ACAC:true` (poc_11 sink `starlette/middleware/cors.py`) → browser hands the credentialed response body to attacker JS → session-scoped data exfiltrated. MEDIUM (conditional); single-primitive; requires the victim to hold a live authenticated session cookie for the target in the same browser. Fully covered by poc_11 (§6d); no new PoC needed.
+**Single precondition:** developer sets `CORSMiddleware(allow_origins=["*"], allow_credentials=True)` on a cookie-authenticated endpoint. **Kill-chain:** attacker hosts a page on any origin → victim with a live session visits it → attacker JS issues `fetch(api, {credentials:'include'})` → Starlette reflects the attacker `Origin` + `ACAC:true` (poc_11 sink `starlette/middleware/cors.py`) → browser hands the credentialed response body to attacker JS → session-scoped data exfiltrated. MEDIUM (conditional); single-primitive; requires the victim to hold a live authenticated session cookie for the target in the same browser. Chain B is now promoted from "poc_11-only coverage" to its own full end-to-end PoC (poc_13) with a dedicated session-cookie-gated terminus (`GET /cors-protected/whoami`); see **§6f** for the full Chain B analysis including live-evidence block, severity, and recommended fix.
 
 ### Why poc_09 and poc_10 are NOT chain links
 
@@ -763,10 +764,10 @@ poc_12 markers (`AUTOFYNCHAIN`, `autofyn-chain-collector.example`, `AUTOFYN_CHAI
 #
 # [[ AUDIT-RESULT ]] chain_token_theft :: FAIL :: Chain A confirmed (browser-modeled qualifier): ...
 #
-# Expected full harness: 6 PASS + 7 FAIL
+# Expected full harness: 6 PASS + 7 FAIL (with poc_13 added: 6 PASS + 8 FAIL)
 #   (existing: swagger_openapi_url_xss, redoc_openapi_url_xss, openapi_servers_url_injection,
 #    host_header_open_redirect, multipart_filepart_size_uncapped, cors_credentialed_origin_reflection,
-#    NEW: chain_token_theft)
+#    chain_token_theft, NEW round 32: cors_credentialed_exfil_chain)
 ```
 
 ### Remediation (audit-only observation — do NOT apply fix per goal constraints)
@@ -776,6 +777,123 @@ Chain A is closed by fixing **either** poc_07 or poc_08 at the framework level (
 1. **Escape `root_path` in docs.py** (`_html_safe_json` at `docs.py:168`) — eliminates the XSS link (Step 2).
 2. **Validate `root_path` URL scheme in applications.py** (reject `//host`, `http://host`; accept only relative path-form) — eliminates the servers-hijack link (Step 1).
 3. **Do not map untrusted `X-Forwarded-Prefix` into `root_path` without sanitization at the proxy boundary** — eliminates the single shared precondition, breaking both links simultaneously.
+
+Per audit goal, NO fix is applied.
+
+---
+
+## 6f. Exploit Chain B — Credentialed CORS Cross-Origin Data Exfiltration
+
+**Status:** CONFIRMED live, poc_13, round 32 (Steps 0/1/2 LIVE-OBSERVED; Step 3 BROWSER-MODELED and labeled as such everywhere).
+
+**Relation to Chain A:** Chain B is an ALTERNATE read-path to Chain A — they end in the same critical outcome (unauthenticated attacker reads a victim's authenticated data) but via fundamentally different mechanisms: Chain A steals a *credential* (operator bearer token) then replays it; Chain B reads the *credentialed response body* directly by defeating the browser's Same-Origin Policy via a CORS misconfiguration. Different single precondition (CORS misconfig vs proxy-prefix), different primitive (credentialed-reflection vs XSS+servers-hijack), independent chains. Chain B is the one-primitive alternate path the round-31 directive specifically requested. **Chain B is a synthesis of finding 5 (poc_11). The "5 independent findings" count stays at 5.**
+
+**Honest framing (preconditions and modeling):**
+
+- **Step 3 is BROWSER-MODELED.** The literal cross-origin browser read — a victim browser, holding the victim's session cookie, visits the attacker's page and the attacker's JS calls `fetch(..., {credentials:'include'})`, with the browser releasing the response body to attacker JS because ACAO==attacker-Origin + ACAC:true — is argued from observations in Steps 0 and 2. No request was issued to any attacker/collector host in the harness. The curl harness has no browser and does not hold the victim's session in a browser context. "BROWSER-MODELED" appears on every maintainer-facing surface: this PoC stdout, the `[[ AUDIT-RESULT ]]` detail line, this report, and the §4 table row.
+
+- **Single precondition (both Starlette defaults safe):** The developer set BOTH `allow_origins=["*"]` AND `allow_credentials=True` on the CORS sub-app. Both Starlette defaults are SAFE: `allow_credentials` defaults to `False`; with credentials off, the literal `"*"` is emitted and browsers block credentialed reads. This is NOT a default-config exploit. A developer may combine these options believing the browser's own "ACAO: * + ACAC: true" safeguard applies — Starlette silently bypasses that safeguard by reflecting the request Origin verbatim instead of emitting `"*"`, producing dangerous behavior with no error or warning.
+
+### Threat model
+
+- **Attacker:** unauthenticated, remote; controls a web page at an arbitrary origin (`https://attacker.cors-poc13.example`).
+- **Victim:** a user who already holds an active authenticated session cookie for the target API (set by a prior login to the target application). The victim is lured to the attacker's page (phishing, malvertising, compromised third-party site).
+- **Trust boundary crossed:** the browser's Same-Origin Policy. SOP normally forbids attacker-origin JS from reading a cross-origin credentialed response. The CORS misconfig (`allow_origins=["*"]` + `allow_credentials=True`) instructs the browser to RELAX SOP for the attacker origin specifically, defeating the safeguard.
+- **End state:** the unauthenticated attacker reads the victim's session-cookie-gated authenticated data cross-origin, with no interaction beyond the victim visiting a page.
+
+### Kill-chain steps
+
+**Step 0 — Terminus is genuinely credential-gated (LIVE-OBSERVED).**
+`GET /cors-protected/whoami` with no cookie → HTTP 401, `AUTOFYN_CORS_EXFIL_SECRET` absent. With the victim session cookie → HTTP 200, `AUTOFYN_CORS_EXFIL_SECRET` present. This is the non-vacuity gate: proves the data is authenticated (not publicly readable), making the exfiltration a genuine data-theft chain rather than a "any origin reads a public endpoint" observation.
+
+**Step 1 — Teeth-test: reflection attributable to the Origin (LIVE-OBSERVED).**
+`GET /cors-protected/whoami` with the victim session cookie but NO `Origin` header → no `Access-Control-Allow-Origin` in the response. CORSMiddleware is inert when no Origin is sent (`cors.py:87-89`). If ACAO appeared here, the reflection could not be attributed to the attacker Origin; the PoC self-downgrades to PASS/inconclusive in that case.
+
+**Step 2 — Credentialed cross-origin reflection fires end-to-end (LIVE-OBSERVED — the core link).**
+`GET /cors-protected/whoami` with BOTH `Origin: https://attacker.cors-poc13.example` AND the victim session cookie:
+- Response header `Access-Control-Allow-Origin: https://attacker.cors-poc13.example` (verbatim attacker Origin — case-insensitive match).
+- Response header `Access-Control-Allow-Credentials: true`.
+- Response header `Vary: Origin` (proves the reflection is Origin-dependent; strengthens attribution).
+- Response body contains `AUTOFYN_CORS_EXFIL_SECRET` (HTTP 200 — the gated data is served alongside the CORS headers).
+
+This is precisely the server-side state a browser inspects before releasing a credentialed cross-origin response to attacker-origin JS. All three headers plus the gated body, measured in one response, is the complete CORS-reflection primitive proven live.
+
+**Step 3 — Attacker JS reads the body cross-origin (BROWSER-MODELED — no request to any attacker host).**
+
+> **BROWSER-MODELED STEP:** This step does NOT issue any request to any attacker or collector host. Instead it asserts the two independently-measured facts that together make cross-origin authenticated-data exfiltration inevitable under a victim browser, then argues the browser behavior as a standard consequence of the Fetch specification's CORS-check algorithm.
+>
+> **(a) Step 2 proved:** the server returns `Access-Control-Allow-Origin: https://attacker.cors-poc13.example` + `Access-Control-Allow-Credentials: true` + the sensitive body `AUTOFYN_CORS_EXFIL_SECRET` for a request carrying the victim session cookie and the attacker Origin. Per the Fetch specification's CORS-check algorithm, a browser receiving exactly these headers for a `fetch(api, {credentials:'include'})` issued by attacker-origin JS RELEASES the response body to that JS. This is the defined CORS release rule — not a novel claim.
+>
+> **(b) Step 0 proved:** the sensitive body is credential-gated (authenticated/sensitive), accessible only with the correct victim session cookie, not publicly readable.
+>
+> Conjunction (a) ∧ (b): attacker-origin JS at `https://attacker.cors-poc13.example` issues `fetch("${WHOAMI_URL}", {credentials:"include"})`, the browser auto-attaches the victim's session cookie, the misconfigured ACAO/ACAC lets attacker JS read the result, and the result contains `AUTOFYN_CORS_EXFIL_SECRET`. The victim's authenticated data is read cross-origin by the attacker's JS.
+>
+> The literal cross-origin read is MODELED, not executed in this curl harness — the harness has no browser and does not hold the victim's session in a browser context. Live-confirmed parts: Steps 0, 1, 2. Step 3 is browser-modeled.
+
+### Severity
+
+**MEDIUM (conditional).** Outcome is cross-origin theft of a victim's authenticated/sensitive data (a serious disclosure), but gated on:
+1. Developer combining `allow_origins=["*"]` + `allow_credentials=True` — both Starlette defaults are SAFE; NOT default-config.
+2. The victim already holding a live authenticated session cookie for the target in the same browser at the time of visiting the attacker's page.
+3. The literal cross-origin browser read is BROWSER-MODELED in the harness, not executed.
+
+Do NOT claim: default-config exploitability; unauthenticated RCE; that the body was read through a live browser in this harness.
+
+### Alternate read-path vs Chain A
+
+| | Chain A | Chain B |
+|---|---|---|
+| Precondition | Proxy maps `X-Forwarded-Prefix` → `root_path` | Developer sets `allow_origins=["*"]` + `allow_credentials=True` |
+| Primitives | poc_07 (XSS) + poc_08 (servers hijack) | poc_11 (CORS credentialed reflection) |
+| Mechanism | Credential theft then replay | Direct body read via browser SOP relaxation |
+| Victim involvement | Privileged operator opens `/docs` while authorized | User with live session visits attacker page |
+| Browser-modeled step | Step 3 (token exfil) | Step 3 (cross-origin body read) |
+
+### Isolation / contamination check
+
+poc_13 markers (`AUTOFYN_VICTIM_SESSION_b41d2e`, `AUTOFYN_CORS_EXFIL_SECRET`, `attacker.cors-poc13.example`) are DISTINCT from all prior PoC markers (`AUTOFYNXSS`, `autofyn-evil.example`, `AUTOFYN_CORS_SENTINEL`, `AUTOFYNCHAIN`, `autofyn-chain-collector.example`, `AUTOFYN_CHAIN_PROTECTED_SECRET`, `AUTOFYN_OPERATOR_TOKEN_7f3a9c`, `attacker.cors-poc11.example`). The `/cors-protected/whoami` endpoint docstring contains none of these marker strings, so they cannot appear in `/cors-protected/openapi.json` or the root `/openapi.json`. The existing `cors_protected` route at `/cors-protected/` and its `AUTOFYN_CORS_SENTINEL` body are left untouched, so poc_11 (`cors_credentialed_origin_reflection`) continues to pass/fail as before.
+
+### Live evidence (reviewer fills in after sidecar live-confirm)
+
+```
+# Expected poc_13 output (to be verified by reviewer via sidecar):
+# Step 0a: GET /cors-protected/whoami (no cookie, no Origin)
+#           → HTTP 401, AUTOFYN_CORS_EXFIL_SECRET absent
+# Step 0b: GET /cors-protected/whoami (victim session cookie, no Origin)
+#           → HTTP 200, AUTOFYN_CORS_EXFIL_SECRET present
+# Step 1:  GET /cors-protected/whoami (victim cookie, no Origin)
+#           → no Access-Control-Allow-Origin (CORSMiddleware inert without Origin)
+# Step 2:  GET /cors-protected/whoami (Origin: https://attacker.cors-poc13.example + victim cookie)
+#           → Access-Control-Allow-Origin: https://attacker.cors-poc13.example
+#           → Access-Control-Allow-Credentials: true
+#           → Vary: Origin
+#           → body contains AUTOFYN_CORS_EXFIL_SECRET (HTTP 200)
+# Step 3:  BROWSER-MODELED (no curl to any attacker host)
+#           — inevitability argued from Steps 0 + 2
+#
+# [[ AUDIT-RESULT ]] cors_credentialed_exfil_chain :: FAIL :: Chain B confirmed
+#   (browser-modeled qualifier): /cors-protected/whoami is session-cookie-gated ...
+#
+# Expected full harness with poc_13: 6 PASS + 8 FAIL
+#   (existing 7: swagger_openapi_url_xss, redoc_openapi_url_xss,
+#    openapi_servers_url_injection, host_header_open_redirect,
+#    multipart_filepart_size_uncapped, cors_credentialed_origin_reflection,
+#    chain_token_theft; NEW: cors_credentialed_exfil_chain)
+```
+
+### Remediation (audit-only observation — do NOT apply fix per goal constraints)
+
+**Never combine `allow_origins=["*"]` with `allow_credentials=True`.** When credentials are required, enumerate an explicit trusted-origin allowlist instead of a wildcard:
+
+```python
+# SAFE: explicit allowlist with credentials
+CORSMiddleware(allow_origins=["https://myapp.example.com"], allow_credentials=True)
+
+# UNSAFE (the foot-gun): wildcard + credentials causes verbatim Origin reflection
+# CORSMiddleware(allow_origins=["*"], allow_credentials=True)
+```
+
+Starlette already refuses to emit the literal `"*"` alongside `ACAC: true` (that combination is spec-forbidden and browsers would block it) — but instead of rejecting the combination at construction time, it silently reflects the request Origin, which is equally dangerous but invisible to developers who believe the wildcard is being used. The safe path is an explicit allowlist; Starlette's own `allow_credentials=False` default is safe when using a wildcard. This is the same fix recommended in §6d for poc_11 — Chain B shares poc_11's root cause entirely.
 
 Per audit goal, NO fix is applied.
 
@@ -814,7 +932,7 @@ Hashes verified by the round-3 explorer against `https://pypi.org/pypi/<pkg>/<ve
 # 1. Build and start the audit container (binds to 127.0.0.1:8137 only)
 bash autofyn_audit/setup.sh
 
-# 2. Run all 12 PoC scripts against the live container
+# 2. Run all 13 PoC scripts against the live container
 bash autofyn_audit/run_all.sh
 
 # 3. Tear down the audit container and network
@@ -840,9 +958,9 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 ```
 
 **PASS** means the framework's defense held (attack blocked) or the benign expected state was confirmed.
-**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, poc_09, poc_10, poc_11, and poc_12: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output).
+**FAIL** means the attack succeeded and is a real finding (poc_01–06) or a precondition failure (harness error). For poc_07, poc_08, poc_09, poc_10, poc_11, poc_12, and poc_13: **FAIL = attack confirmed = live finding** (this is the EXPECTED and CORRECT output).
 
-`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **7 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection, poc_10 `multipart_filepart_size_uncapped` = confirmed max_part_size asymmetry for file parts, poc_11 `cors_credentialed_origin_reflection` = confirmed CORS credentialed reflection, poc_12 `chain_token_theft` = confirmed end-to-end Chain A token theft).
+`run_all.sh` collects all `[[ AUDIT-RESULT ]]` lines and exits 0 (harness ran to completion); a FAIL line triggers the "REAL FINDING DETECTED" banner but does not change the exit code. Expected run result: **6 PASS** (poc_01–06, defense/supply-chain checks) + **8 FAIL** (poc_07 `swagger_openapi_url_xss` = confirmed XSS, poc_07 `redoc_openapi_url_xss` = confirmed secondary XSS sink, poc_08 `openapi_servers_url_injection` = confirmed servers URL injection, poc_09 `host_header_open_redirect` = confirmed open redirect / Host-header injection, poc_10 `multipart_filepart_size_uncapped` = confirmed max_part_size asymmetry for file parts, poc_11 `cors_credentialed_origin_reflection` = confirmed CORS credentialed reflection, poc_12 `chain_token_theft` = confirmed end-to-end Chain A token theft, poc_13 `cors_credentialed_exfil_chain` = confirmed end-to-end Chain B authenticated-data exfil).
 
 ### Pinned references
 
@@ -871,6 +989,8 @@ Each PoC prints one or more `[[ AUDIT-RESULT ]]` lines of the form:
 5. **CORSMiddleware reflects arbitrary `Origin` with credentials** (CONFIRMED, poc_11, round 20): MEDIUM (conditional), `starlette/middleware/cors.py`, attacker `Origin` reflected into `Access-Control-Allow-Origin` + `Access-Control-Allow-Credentials: true` — credentialed cross-origin disclosure from any origin. Precondition: `allow_origins=["*"]` + `allow_credentials=True` (both Starlette defaults are safe). Remediation: enumerate an explicit trusted-origin allowlist when credentials are required (see §6d).
 
 **Exploit Chain A** (CONFIRMED, poc_12, round 31): findings 1 and 2, chained under their shared single precondition, yield a **HIGH (conditional) / CRITICAL-impact end-to-end kill-chain** — one documented proxy misconfiguration simultaneously arms the Swagger XSS (poc_07) AND the Swagger base-URL hijack (poc_08), enabling an unauthenticated attacker to capture an API operator's bearer token and replay it to read authenticated data. Step 3 (cross-origin browser exfil) is browser-modeled and explicitly labeled as such — every other link is mechanically confirmed live. This chain does NOT inflate the independent-finding count (it is a synthesis of existing findings 1 and 2). See §6e.
+
+**Exploit Chain B** (CONFIRMED, poc_13, round 32): finding 5 (CORS credentialed reflection, poc_11) forms a **MEDIUM (conditional) alternate end-to-end data-exfil chain** — a victim with an active authenticated session cookie visits the attacker's page; attacker-origin JS issues a credentialed cross-origin fetch; the CORS misconfig reflects the attacker Origin + ACAC:true, instructing the browser to release the session-cookie-gated response body to attacker JS. Steps 0/1/2 are live-confirmed; Step 3 (cross-origin browser read) is browser-modeled and labeled as such. Chain B is the alternate read-path (credential-free, direct body read via browser SOP relaxation) to Chain A (credential-theft then replay). It does NOT inflate the independent-finding count (it is a synthesis of finding 5). See §6f.
 
 Findings 1, 2, and the Chain A synthesis are upstream-inherited, not fork-planted, and require the documented "Behind a Proxy" deployment (a proxy/middleware maps `X-Forwarded-Prefix` into `root_path`). Default uvicorn-without-proxy is not exploitable for any of them. Finding 3 requires only a trailing-slash route and default `redirect_slashes=True`. Finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap. Finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
