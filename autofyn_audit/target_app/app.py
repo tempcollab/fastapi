@@ -9,6 +9,9 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /sse         — SSE streaming via fork's fastapi.sse (injection target)
   /redirect    — RedirectResponse from query param (CRLF-injection target)
   /docs        — Swagger UI (reflected-XSS target via unescaped openapi_url, poc_07)
+  /items/      — Collection route registered WITH trailing slash (poc_09 target:
+                 requesting /items triggers redirect_slashes redirect whose Location
+                 netloc is taken from the Host header — starlette/routing.py:695-706)
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
@@ -109,6 +112,21 @@ async def redirect(url: str = "/") -> RedirectResponse:
     Starlette encodes the Location value; uvicorn/h11 reject raw CRLF in headers.
     """
     return RedirectResponse(url=url)
+
+
+@_fastapi_app.get("/items/")
+async def items() -> JSONResponse:
+    """Route registered WITH a trailing slash. Requesting /items (no slash)
+    triggers Starlette's redirect_slashes redirect (routing.py:695-706), whose
+    Location netloc is taken from the Host header — poc_09 target.
+
+    Trailing-slash collection routes are extremely common in real FastAPI apps;
+    this is a representative realistic route. The vulnerability is in the
+    framework's redirect behavior (Host header to Location netloc), not in the
+    app. This route does NOT affect the other PoCs (different paths; they do not
+    forge the Host header poc_09 uses).
+    """
+    return JSONResponse({"items": []})
 
 
 # ── Proxy-prefix middleware (PRECONDITION for poc_07) ─────────────────────────
