@@ -15,6 +15,9 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /upload      — UploadFile endpoint (poc_10 target: demonstrates that max_part_size
                  is enforced for form fields but NOT for file parts in starlette's
                  MultiPartParser — formparsers.py:183-188)
+  /cors-protected — isolated sub-app with CORSMiddleware(allow_origins=["*"],
+                 allow_credentials=True): Starlette reflects attacker Origin into
+                 ACAO + ACAC:true (poc_11 target, cors.py:166-178).
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
@@ -29,6 +32,7 @@ from typing import Any, Awaitable, Callable, MutableMapping
 
 import fastapi
 from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -151,6 +155,54 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
     """
     content = await file.read()
     return JSONResponse({"received_bytes": len(content)})
+
+
+# ── CORS-protected sub-app (poc_11 target) ───────────────────────────────────
+#
+# A SEPARATE FastAPI sub-app whose ONLY purpose is to demonstrate the Starlette
+# CORSMiddleware foot-gun: allow_origins=["*"] + allow_credentials=True causes
+# Starlette to REFLECT the attacker-controlled Origin request header into
+# Access-Control-Allow-Origin together with Access-Control-Allow-Credentials: true
+# (starlette/middleware/cors.py:166-168 -> allow_explicit_origin at :178), instead
+# of emitting the browser-rejected "ACAO: * + ACAC: true" combination. This
+# defeats the browser's own safeguard and lets ANY origin read authenticated
+# responses.
+#
+# ISOLATION (poc_11 must NOT contaminate poc_01-10):
+#   - This config lives on a DEDICATED sub-app (_cors_subapp), NOT on _fastapi_app.
+#   - CORSMiddleware is INERT for requests with no Origin header
+#     (cors.py:87-89: origin is None -> pass through unchanged), and poc_01-10
+#     send no Origin header — so even reachability via the shared server cannot
+#     alter their responses. The dedicated sub-app makes the isolation structural.
+#   - The mount is a sub-application mount; it does not touch the routes, the
+#     ProxyPrefixMiddleware chain, or any header poc_01-10 depends on.
+#
+# AUDIT NOTE: This is a CONFIGURATION-DEPENDENT foot-gun (the developer must
+# explicitly set BOTH allow_origins=["*"] AND allow_credentials=True; both
+# Starlette defaults are safe). It is included because Starlette SILENTLY
+# produces the dangerous reflective behavior with no error/warning — a
+# framework-behavior concern, MEDIUM-conditional, NOT a default-config exploit.
+_cors_subapp = FastAPI(title="autofyn-audit-cors-subapp", version="0.0.1")
+
+
+@_cors_subapp.get("/")
+async def cors_protected() -> JSONResponse:
+    """Returns a sentinel 'secret' value. In a real app this would be an
+    authenticated, cookie/Authorization-gated response. The poc_11 finding is
+    that CORSMiddleware reflects ANY Origin + ACAC:true, so attacker JS from any
+    origin could read this body cross-origin with credentials included."""
+    return JSONResponse({"secret": "AUTOFYN_CORS_SENTINEL"})
+
+
+_fastapi_app.mount(
+    "/cors-protected",
+    CORSMiddleware(
+        _cors_subapp,
+        allow_origins=["*"],
+        allow_credentials=True,
+    ),
+    name="cors_protected",
+)
 
 
 # ── Proxy-prefix middleware (PRECONDITION for poc_07) ─────────────────────────
