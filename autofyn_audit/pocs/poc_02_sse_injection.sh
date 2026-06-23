@@ -76,10 +76,14 @@ else
     FAILURES+=("no_initial_event")
 fi
 
+# NOTE: assertions below use `printf '%s\n' "$RAW_RESPONSE" | grep -E '^...'`.
+# Splitting on real newlines + a POSIX `^`-anchored ERE is portable across
+# GNU grep AND ugrep (this environment ships ugrep, which does not support the
+# GNU-only `-P` / `(^|\n)` constructs the original used).
+
 # 2. No bare `retry:` line produced by injection (bare = not prefixed with `: `).
-# We allow `: retry:` (properly prefixed) but NOT `\nretry: ` as a field.
-if echo "${RAW_RESPONSE}" | grep -qP '(^|\n)retry:' 2>/dev/null || \
-   echo "${RAW_RESPONSE}" | grep -q $'\nretry:' 2>/dev/null; then
+# A correctly-neutralized comment line is `: retry: 0` and will NOT match `^retry:`.
+if printf '%s\n' "${RAW_RESPONSE}" | grep -Eq '^retry:'; then
     echo "[FAIL] Bare 'retry:' field found in SSE wire output — injection breakout!"
     PASS=0
     FAILURES+=("bare_retry_field")
@@ -87,42 +91,25 @@ else
     echo "[OK] No bare 'retry:' field injected"
 fi
 
-# 3. No bare `data: INJECTED` line (injected content appearing as an uncontrolled data field).
-# Note: `: data: INJECTED` (prefixed with `: `) is acceptable — that means it's in comment.
-# We look for a line that starts with `data: INJECTED` (or `data:INJECTED`) without `: ` prefix.
-if echo "${RAW_RESPONSE}" | grep -qP '(^|\n)data: INJECTED' 2>/dev/null || \
-   [[ "${RAW_RESPONSE}" == *$'\ndata: INJECTED'* ]] || \
-   [[ "${RAW_RESPONSE}" == "data: INJECTED"* ]]; then
-    # Double-check: is this actually prefixed with ': '?
-    # If the line is ': data: INJECTED' that is fine (comment).
-    if echo "${RAW_RESPONSE}" | grep -qE '(^|[^:]) *data: INJECTED' 2>/dev/null; then
-        echo "[FAIL] Bare 'data: INJECTED' field found — injection escaped comment prefix!"
-        PASS=0
-        FAILURES+=("bare_data_injected")
-    else
-        echo "[OK] 'data: INJECTED' only appears prefixed (within comment) — neutralized"
-    fi
+# 3. No bare `data: INJECTED` line. A neutralized line is `: data: INJECTED`
+# (prefixed) and will NOT match `^data:`.
+if printf '%s\n' "${RAW_RESPONSE}" | grep -Eq '^data: INJECTED'; then
+    echo "[FAIL] Bare 'data: INJECTED' field found — injection escaped comment prefix!"
+    PASS=0
+    FAILURES+=("bare_data_injected")
 else
-    echo "[OK] No bare 'data: INJECTED' field in response"
+    echo "[OK] No bare 'data: INJECTED' field (injection neutralized within comment)"
 fi
 
-# 4. No bare `event:` field injected from payload.
-if echo "${RAW_RESPONSE}" | grep -qP '(^|\n)event: ' 2>/dev/null; then
-    # Allow our own `event: status` from the first yield — that's legitimate.
-    # We only fail if additional `event:` lines appear that could be from injection.
-    EVENT_LINES="$(echo "${RAW_RESPONSE}" | grep -P '(^|\n)?event: ' || true)"
-    echo "event: lines found: ${EVENT_LINES}"
-    # The only expected event: line is `event: status` from the first yield.
-    UNEXPECTED_EVENTS="$(echo "${EVENT_LINES}" | grep -v 'event: status' || true)"
-    if [[ -n "$UNEXPECTED_EVENTS" ]]; then
-        echo "[FAIL] Unexpected 'event:' field injected: ${UNEXPECTED_EVENTS}"
-        PASS=0
-        FAILURES+=("injected_event_field")
-    else
-        echo "[OK] Only expected 'event: status' present — no injected event fields"
-    fi
+# 4. No injected `event:` field. The only legitimate one is `event: status`
+# from the first yield; any other bare `event:` line is an injection breakout.
+UNEXPECTED_EVENTS="$(printf '%s\n' "${RAW_RESPONSE}" | grep -E '^event:' | grep -v '^event: status' || true)"
+if [[ -n "$UNEXPECTED_EVENTS" ]]; then
+    echo "[FAIL] Unexpected 'event:' field injected: ${UNEXPECTED_EVENTS}"
+    PASS=0
+    FAILURES+=("injected_event_field")
 else
-    echo "[OK] No unexpected 'event:' fields in response (no injection)"
+    echo "[OK] No unexpected 'event:' field (only legitimate 'event: status' present)"
 fi
 
 # 5. Check that injected content appears RE-PREFIXED with `: ` (comment prefix).

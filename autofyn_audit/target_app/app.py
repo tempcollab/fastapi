@@ -86,14 +86,16 @@ async def sse_endpoint(inject: str = ""):
     - `event` / `id` raise ValueError on newlines (different defense path).
     - `comment` / `data` / `raw_data` use splitlines() re-prefixing (the path
       we want to demonstrate and verify live).
-    """
-    async def generate():
-        # Static data event first — confirms SSE stream is working.
-        yield ServerSentEvent(data="connected", event="status")
-        # The injection target: user input in the comment field.
-        yield ServerSentEvent(comment=inject if inject else "ping")
 
-    return generate()
+    NOTE: the endpoint callable is itself an async generator (it `yield`s
+    directly). The fork's SSE routing path checks `dependant.is_async_gen_callable`
+    (routing.py:538); returning an inner generator would make this endpoint a
+    coroutine function instead, which the SSE producer cannot iterate.
+    """
+    # Static data event first — confirms SSE stream is working.
+    yield ServerSentEvent(data="connected", event="status")
+    # The injection target: user input in the comment field.
+    yield ServerSentEvent(comment=inject if inject else "ping")
 
 
 @app.get("/redirect")

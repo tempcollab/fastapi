@@ -101,7 +101,8 @@ wait_for_health() {
 # Always targets our exact pinned container name.
 dexec() {
     assert_safe_resource_name container "$CONTAINER_NAME"
-    docker exec "$CONTAINER_NAME" "$@"
+    # -i keeps stdin open so piped stdin / heredocs (e.g. `python3 -`) work.
+    docker exec -i "$CONTAINER_NAME" "$@"
 }
 
 # ── String assertions ─────────────────────────────────────────────────────────
