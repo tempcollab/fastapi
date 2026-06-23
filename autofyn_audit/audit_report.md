@@ -602,7 +602,7 @@ When the developer configures `CORSMiddleware(allow_origins=["*"], allow_credent
 
 ### Location
 
-- **Sink:** `starlette/middleware/cors.py` — in `CORSMiddleware.__init__`, when `"*" in allow_origins` **and** `allow_credentials` is true, the simple/preflight response path takes the **explicit-origin** branch (`allow_explicit_origin`) rather than emitting the literal `"*"`, so `send`/`simple_headers` set `Access-Control-Allow-Origin: <request Origin>` and `Access-Control-Allow-Credentials: true`.
+- **Sink:** `starlette/middleware/cors.py` — `CORSMiddleware.__init__` sets `allow_all_origins` and `allow_credentials`; at **request time** (in `send`, via the `allow_explicit_origin` path) when `allow_all_origins` **and** `allow_credentials` are both true, the response takes the **explicit-origin** branch rather than emitting the literal `"*"`, so the headers are set to `Access-Control-Allow-Origin: <request Origin>` and `Access-Control-Allow-Credentials: true`.
 - **Re-export:** `fastapi/middleware/cors.py` (`from starlette.middleware.cors import CORSMiddleware as CORSMiddleware`).
 - **Inert without `Origin`:** with no `Origin` request header, `CORSMiddleware` passes the response through unchanged (no `Access-Control-Allow-Origin` emitted) — the basis for the poc_11 teeth-test.
 
