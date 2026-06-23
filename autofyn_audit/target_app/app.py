@@ -8,14 +8,18 @@ Each endpoint is written SAFELY and exercises a specific security surface:
   /static      — StaticFiles mount (path-traversal target)
   /sse         — SSE streaming via fork's fastapi.sse (injection target)
   /redirect    — RedirectResponse from query param (CRLF-injection target)
+  /docs        — Swagger UI (reflected-XSS target via unescaped openapi_url, poc_07)
 
 Design intent:
   - No intentional vulnerabilities; PoCs test FRAMEWORK defenses, not app bugs.
+    Exception: ProxyPrefixMiddleware below is the DOCUMENTED "Behind a Proxy"
+    deployment precondition required to make the /docs openapi_url XSS reachable.
   - Uses Path(__file__).parent for all directory refs — CWD-independent.
   - Uses the fork's own fastapi.sse module to exercise the real fork surface.
 """
 
 from pathlib import Path
+from typing import Any, Awaitable, Callable, MutableMapping
 
 import fastapi
 from fastapi import FastAPI, Request
@@ -28,12 +32,12 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 # All directory references resolved relative to this file — never CWD-dependent.
 _HERE = Path(__file__).parent
 
-app = FastAPI(title="autofyn-audit-target", version="0.0.1")
+_fastapi_app = FastAPI(title="autofyn-audit-target", version="0.0.1")
 
 # ── Static files ──────────────────────────────────────────────────────────────
 # Serves only files inside _HERE/static/.
 # SECRET_sentinel.txt lives at _HERE (outside static/) — traversal must NOT reach it.
-app.mount(
+_fastapi_app.mount(
     "/static",
     StaticFiles(directory=str(_HERE / "static")),
     name="static",
@@ -46,7 +50,7 @@ templates = Jinja2Templates(directory=str(_HERE / "templates"))
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@app.get("/health")
+@_fastapi_app.get("/health")
 async def health() -> JSONResponse:
     """Liveness probe. Returns fastapi version so setup.sh can assert the pin."""
     return JSONResponse(
@@ -54,13 +58,13 @@ async def health() -> JSONResponse:
     )
 
 
-@app.get("/echo")
+@_fastapi_app.get("/echo")
 async def echo(msg: str = "") -> JSONResponse:
     """Return user input as JSON. JSON encoding neutralizes injection payloads."""
     return JSONResponse({"echo": msg})
 
 
-@app.get("/greet")
+@_fastapi_app.get("/greet")
 async def greet(name: str, request: Request) -> fastapi.responses.HTMLResponse:
     """Render greet.html with {{ name }} context variable.
     Jinja2 autoescape is ON (Starlette default) — framework defends against SSTI/XSS.
@@ -72,7 +76,7 @@ async def greet(name: str, request: Request) -> fastapi.responses.HTMLResponse:
     )
 
 
-@app.get("/sse", response_class=EventSourceResponse)
+@_fastapi_app.get("/sse", response_class=EventSourceResponse)
 async def sse_endpoint(inject: str = ""):
     """SSE endpoint exercising the fork's fastapi.sse serialization path.
 
@@ -98,10 +102,77 @@ async def sse_endpoint(inject: str = ""):
     yield ServerSentEvent(comment=inject if inject else "ping")
 
 
-@app.get("/redirect")
+@_fastapi_app.get("/redirect")
 async def redirect(url: str = "/") -> RedirectResponse:
     """Redirect to the provided URL.
     Target for CRLF/header-injection test (poc_06).
     Starlette encodes the Location value; uvicorn/h11 reject raw CRLF in headers.
     """
     return RedirectResponse(url=url)
+
+
+# ── Proxy-prefix middleware (PRECONDITION for poc_07) ─────────────────────────
+#
+# Faithful representation of the documented FastAPI "Behind a Proxy" deployment
+# (proxies like nginx/traefik/k8s-ingress set X-Forwarded-Prefix; this middleware
+# maps it to scope["root_path"]).  This is the PRECONDITION for the /docs
+# openapi_url XSS — the framework sink (docs.py:168) is reached only when something
+# maps an untrusted request value into root_path.
+#
+# Implementation notes:
+#   - Pure ASGI middleware: wraps the ASGI callable directly, mutating scope BEFORE
+#     FastAPI.__call__ is invoked.  This is more faithful than BaseHTTPMiddleware
+#     (which runs inside the ASGI chain AFTER FastAPI.__call__ builds its Request).
+#   - When X-Forwarded-Prefix is absent the scope is left ENTIRELY unchanged, so
+#     poc_01–poc_06 (which send no such header) are completely unaffected.
+#   - FastAPI.__call__ at applications.py:1159-1162 overwrites scope["root_path"]
+#     only when self.root_path is truthy; _fastapi_app has no root_path arg so
+#     self.root_path == "" (falsy) and will NOT clobber the injected value.
+#   - The module-level name `app` is rebound to this wrapper LAST so that
+#     `uvicorn app:app` resolves to the outermost ASGI callable.  All decorators
+#     (@_fastapi_app.get / .mount) ran against the FastAPI instance at definition
+#     time and remain correctly registered.
+
+_ASGIScope = MutableMapping[str, Any]
+_ASGIReceive = Callable[[], Awaitable[MutableMapping[str, Any]]]
+_ASGISend = Callable[[MutableMapping[str, Any]], Awaitable[None]]
+
+
+class ProxyPrefixMiddleware:
+    """Map X-Forwarded-Prefix request header into scope["root_path"].
+
+    This is the documented FastAPI "Behind a Proxy" pattern (see FastAPI docs:
+    "Behind a Proxy / Behind a Load Balancer").  Reverse proxies such as nginx,
+    Traefik, and Kubernetes ingress controllers set this header to signal the
+    path prefix at which the application is mounted.  Mapping it to root_path
+    is the recommended ASGI-level handling for that signal.
+
+    AUDIT NOTE: This middleware is the PRECONDITION for the reflected-XSS
+    confirmed by poc_07.  Without something (this middleware or a real proxy)
+    mapping X-Forwarded-Prefix into root_path, the /docs openapi_url sink
+    (fastapi/openapi/docs.py:168) is not reachable with attacker-controlled
+    input in a default uvicorn deployment.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self._app = asgi_app
+
+    async def __call__(
+        self,
+        scope: _ASGIScope,
+        receive: _ASGIReceive,
+        send: _ASGISend,
+    ) -> None:
+        if scope["type"] == "http":
+            headers: dict[bytes, bytes] = dict(scope.get("headers") or [])
+            prefix_bytes = headers.get(b"x-forwarded-prefix")
+            if prefix_bytes is not None:
+                # Mutate a COPY of scope so the original mapping is not shared.
+                scope = dict(scope)
+                scope["root_path"] = prefix_bytes.decode("latin-1")
+        await self._app(scope, receive, send)
+
+
+# Rebind `app` to the outermost ASGI callable so `uvicorn app:app` resolves
+# to the wrapper.  This MUST be the last statement touching `app`.
+app = ProxyPrefixMiddleware(_fastapi_app)
