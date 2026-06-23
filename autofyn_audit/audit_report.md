@@ -12,7 +12,7 @@
 
 This audit examined the `tempcollab/fastapi` fork (pinned commit 202b2d2) to determine whether it contains planted backdoors, supply-chain substitutions, or critical exploitable vulnerabilities. The audit found **no planted critical vulnerability, no code-level modification from upstream, and no supply-chain tampering.** The `fastapi/` Python package tree is byte-for-byte identical to the official upstream PyPI release 0.137.1. The dependency lockfile (uv.lock) was verified against PyPI hashes for all differing pins, with zero mismatches. The `fastar` dependency that triggered OSV advisory MAL-2026-4750 is a genuine upstream FastAPI dependency; that advisory was withdrawn as a false positive (OSSF PR #1276).
 
-However, **four genuine inherited vulnerabilities were confirmed** — two under the documented FastAPI "Behind a Proxy" deployment pattern (where a reverse proxy or ASGI middleware maps `X-Forwarded-Prefix` into `scope["root_path"]`), one that fires without any proxy, and one that is a semantic framework asymmetry:
+However, **five genuine inherited vulnerabilities were confirmed** — two under the documented FastAPI "Behind a Proxy" deployment pattern (where a reverse proxy or ASGI middleware maps `X-Forwarded-Prefix` into `scope["root_path"]`), one that fires without any proxy, one that is a semantic framework asymmetry, and one CORS configuration foot-gun:
 
 1. **Reflected XSS in Swagger UI `/docs`** (`fastapi/openapi/docs.py:168`): `openapi_url` is interpolated raw into a single-quoted JavaScript string literal with no escaping. An unauthenticated attacker can break out of the JS string and inject arbitrary script. This is **HIGH (conditional)**, comparable to cadwyn advisory GHSA-2gxp-6r36-m97r (CVSS 7.6 HIGH), and is **CONFIRMED (live, poc_07, round 6)**.
 
@@ -22,9 +22,11 @@ However, **four genuine inherited vulnerabilities were confirmed** — two under
 
 4. **multipart `max_part_size` not enforced on file parts** (`starlette/formparsers.py:183-188`): the `max_part_size` limit (default 1 MiB) is enforced only for non-file form fields; parts carrying `filename=` (file parts, surfaced as `UploadFile`) are streamed without any per-part size ceiling into a `SpooledTemporaryFile` that spills to disk past 1 MiB. This is **LOW (conditional)** and is **CONFIRMED (live, poc_10, round 12)**.
 
-All four weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
+5. **CORSMiddleware reflects arbitrary `Origin` with credentials** (`starlette/middleware/cors.py`, re-exported as `fastapi.middleware.cors.CORSMiddleware`): with `allow_origins=["*"]` + `allow_credentials=True`, Starlette silently reflects the attacker `Origin` into `Access-Control-Allow-Origin` together with `Access-Control-Allow-Credentials: true`, enabling credentialed cross-origin reads from any origin. This is **MEDIUM (conditional on that config combination)** and is **CONFIRMED (live, poc_11, round 20)**.
 
-**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 4 findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry), all upstream-inherited. Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap.
+All five weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Starlette** (not fork-planted backdoors).
+
+**Summary:** 6 existing framework-defense / supply-chain checks still pass (no regression); 5 findings confirmed (1 HIGH reflected-XSS, 1 MEDIUM servers URL injection, 1 LOW-to-MEDIUM open redirect, 1 LOW multipart size-cap asymmetry, 1 MEDIUM CORS credentialed-reflection foot-gun), all upstream-inherited. Findings 1 and 2 require the proxy-prefix precondition; finding 3 requires only a trailing-slash route with default `redirect_slashes=True` (for full impact, additionally an upstream cache/proxy that forwards arbitrary `Host`); finding 4 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 5 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -59,7 +61,7 @@ All four weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 
 **fastar static analysis:** Extracted the `fastar-0.11.0` wheel; scanned the compiled `.so` binary for malicious indicators (hardcoded URLs, IPs, credential paths, network socket calls, base64 blobs, subprocess/eval/exec strings). Verified the CycloneDX SBOM lists only expected Rust crates (tar, flate2, zstd, pyo3). Verified OSV MAL-2026-4750 status: withdrawn as false positive via OSSF PR #1276.
 
-**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09 and `/upload` added for poc_10). Ten PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, and poc_10 are finding checks (FAIL = attack succeeded = confirmed finding).
+**Live behavioral harness:** Built a Docker image from the fork source (pinned to commit 202b2d2, base image digest above) containing a minimal FastAPI test application exposing the audited endpoints (including `/docs`, `/redoc`, and `/openapi.json` provided automatically by FastAPI, plus `/items/` added for poc_09, `/upload` added for poc_10, and a dedicated `/cors-protected` sub-app added for poc_11). Eleven PoC scripts exercised targeted attack classes and printed greppable `[[ AUDIT-RESULT ]]` PASS/FAIL lines. Each PoC is self-contained, reproducible, and describes its semantics. PoCs 01–06 are defense checks (PASS = attack blocked); poc_07, poc_08, poc_09, poc_10, and poc_11 are finding checks (FAIL = attack succeeded = confirmed finding).
 
 ---
 
@@ -80,8 +82,9 @@ All four weaknesses are **inherited verbatim from upstream FastAPI 0.137.1 / Sta
 | 11 | OpenAPI `servers` URL injection via `X-Forwarded-Prefix` → root_path (`/openapi.json`) | Server-URL hijack / open redirect of API traffic | MEDIUM (conditional on proxy-prefix handling) | FAIL — attacker host injected as first `servers[].url` at applications.py:1114; Swagger "Try it out"/authorized calls redirected to attacker; CONFIRMED (live, poc_08, round 7) |
 | 12 | Host-header injection → open redirect via `redirect_slashes` (`/items` → `/items/`) | Open redirect / Host-header injection | LOW-to-MEDIUM (conditional) | FAIL — Host header flows unvalidated into Location netloc at starlette/routing.py:706; enabled by FastAPI default redirect_slashes=True; CONFIRMED (live, poc_09, round 9 — re-finalized round 10) |
 | 13 | multipart `max_part_size` not enforced on file parts (`/upload` UploadFile endpoint) | Resource DoS / semantic size-cap asymmetry | LOW (conditional) | FAIL — max_part_size enforced for form fields only; 2MiB file part accepted in full (received_bytes=2097152) while same payload as a field part is rejected 4xx; sink: formparsers.py:183-188; CONFIRMED (live, poc_10, round 12) |
+| 14 | CORSMiddleware reflects arbitrary `Origin` + `Access-Control-Allow-Credentials: true` (`/cors-protected` sub-app) | CORS credentialed cross-origin disclosure | MEDIUM (conditional on `allow_origins=["*"]` + `allow_credentials=True`) | FAIL — attacker `Origin` reflected into ACAO with ACAC:true, enabling credentialed cross-origin reads; sink: starlette/middleware/cors.py; CONFIRMED (live, poc_11, round 20) |
 
-**Four conditional findings (rows 10–13); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** All four findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap.
+**Five conditional findings (rows 10–14); all framework-defense checks (rows 5–9) and supply-chain checks (rows 1–4) otherwise passed.** All five findings are upstream-inherited (not fork-planted). Findings 10–11 require the proxy-prefix deployment precondition; finding 12 requires only a trailing-slash route with default `redirect_slashes=True` (for meaningful exploitation additionally requires an upstream cache/proxy forwarding arbitrary `Host`); finding 13 requires an UploadFile endpoint with no upstream proxy body-size cap; finding 14 requires the developer to combine `allow_origins=["*"]` with `allow_credentials=True`.
 
 ---
 
@@ -583,6 +586,89 @@ bash autofyn_audit/run_all.sh
 2. Alternatively, cap the upload size at the **app layer** (read file in bounded chunks, reject above threshold) or at the **proxy layer** (nginx `client_max_body_size`, AWS ALB / CloudFront `max-body-size`, etc.).
 
 Per audit goal, NO fix is applied to the framework.
+
+---
+
+## 6d. Finding — CORSMiddleware reflects arbitrary `Origin` with credentials
+
+**Status:** CONFIRMED (live, poc_11, round 20).
+
+**Finding (MEDIUM-conditional, upstream-inherited): credentialed cross-origin disclosure via `Origin` reflection.**
+When the developer configures `CORSMiddleware(allow_origins=["*"], allow_credentials=True)` (FastAPI re-exports it as `fastapi.middleware.cors.CORSMiddleware`), Starlette does **not** emit the browser-rejected `Access-Control-Allow-Origin: *` + `Access-Control-Allow-Credentials: true` combination. Instead it **reflects the attacker-supplied `Origin` request header verbatim** into `Access-Control-Allow-Origin` and adds `Access-Control-Allow-Credentials: true`. The result is a working, browser-accepted credentialed cross-origin read: JS on **any** attacker origin can read cookie/`Authorization`-gated response bodies of the victim API. The dangerous transformation happens **silently** — no error, no warning — even though a developer may believe `"*"` makes credentialed reads browser-impossible.
+
+### Severity
+
+**MEDIUM (conditional).** Cross-origin disclosure of credentialed responses (session-scoped data, CSRF tokens, etc.). No RCE. Gated **entirely** on the developer opting into the unsafe `allow_origins=["*"]` + `allow_credentials=True` combination — both Starlette defaults are safe (`allow_credentials` defaults `False`, and with credentials off the literal `"*"` is emitted, which browsers refuse to use with credentials). The reportable nucleus is the **silent foot-gun**: the framework converts a configuration the developer may consider browser-safe into a functioning credentialed-CORS bypass with no diagnostic.
+
+### Location
+
+- **Sink:** `starlette/middleware/cors.py` — in `CORSMiddleware.__init__`, when `"*" in allow_origins` **and** `allow_credentials` is true, the simple/preflight response path takes the **explicit-origin** branch (`allow_explicit_origin`) rather than emitting the literal `"*"`, so `send`/`simple_headers` set `Access-Control-Allow-Origin: <request Origin>` and `Access-Control-Allow-Credentials: true`.
+- **Re-export:** `fastapi/middleware/cors.py` (`from starlette.middleware.cors import CORSMiddleware as CORSMiddleware`).
+- **Inert without `Origin`:** with no `Origin` request header, `CORSMiddleware` passes the response through unchanged (no `Access-Control-Allow-Origin` emitted) — the basis for the poc_11 teeth-test.
+
+### Precondition (stated prominently — do NOT overstate)
+
+**Exploitable only when** the developer explicitly sets **both** `CORSMiddleware(allow_origins=["*"], allow_credentials=True)`. This is **NOT a default-config remote exploit** — it is a configuration-dependent framework foot-gun. The audit target reproduces it on a **dedicated isolated sub-app** mounted at `/cors-protected` configured with exactly this combination; the main app (poc_01–10) is unaffected.
+
+### Independence from poc_07/08/09/10
+
+| Dimension | poc_07 (XSS) | poc_08 (servers) | poc_09 (open redirect) | poc_10 (size DoS) | poc_11 (CORS) |
+|-----------|-------------|-----------------|----------------------|------------------|---------------|
+| Source | X-Forwarded-Prefix | X-Forwarded-Prefix | Host header | request body file part | **Origin header** |
+| Sink | docs.py:168 | applications.py:1114 | routing.py:706 | formparsers.py:188 | **middleware/cors.py** |
+| Attack class | Reflected XSS | API base-URL hijack | Open redirect | Disk/IO DoS | **Credentialed cross-origin read** |
+| Fix-orthogonal | escape root_path | validate root_path | TrustedHostMiddleware | size-ceil file parts | **don't combine `*`+credentials / reflect allowlist only** |
+
+**Fully independent:** distinct source (`Origin`), distinct sink (`middleware/cors.py`), distinct attack class (CORS credentialed disclosure), fix-orthogonal to all four prior findings. No shared source with any prior PoC.
+
+### Data Flow
+
+```
+GET /cors-protected/  with  Origin: https://attacker.cors-poc11.example
+  → CORSMiddleware (allow_origins=["*"], allow_credentials=True)
+  → "*" + credentials ⇒ explicit-origin branch (not literal "*")
+  → Access-Control-Allow-Origin: https://attacker.cors-poc11.example   (reflected)
+  → Access-Control-Allow-Credentials: true
+  → browser allows attacker-origin JS to read the credentialed response body
+```
+
+### Live Evidence (poc_11, round 20)
+
+- Teeth-test: `GET /cors-protected/` with **no** `Origin` → no `Access-Control-Allow-Origin` header (CORSMiddleware inert — non-vacuous).
+- Exploit: `GET /cors-protected/` with `Origin: https://attacker.cors-poc11.example` → `Access-Control-Allow-Origin: https://attacker.cors-poc11.example` + `Access-Control-Allow-Credentials: true`.
+- `poc_11` emits `cors_credentialed_origin_reflection :: FAIL`.
+
+### Upstream Parity — Inherited, Not Fork-Planted
+
+`starlette/middleware/cors.py` is the installed upstream Starlette code (not modified by this fork); FastAPI merely re-exports it. The behavior persists in current upstream Starlette. Inherited, not a fork-planted backdoor. Per audit goal, no fix is applied.
+
+### Reproduction Steps
+
+```bash
+# 1. Start the audit container
+bash autofyn_audit/setup.sh
+
+# 2. Teeth-test — no Origin header → no ACAO emitted
+curl -sS -D - -o /dev/null http://127.0.0.1:8137/cors-protected/ | grep -i access-control
+# Expected: (no Access-Control-Allow-Origin line)
+
+# 3. Exploit — arbitrary Origin reflected with credentials
+curl -sS -D - -o /dev/null \
+    -H "Origin: https://attacker.cors-poc11.example" \
+    http://127.0.0.1:8137/cors-protected/ | grep -i access-control
+# Expected (FAIL = confirmed finding):
+#   access-control-allow-origin: https://attacker.cors-poc11.example
+#   access-control-allow-credentials: true
+
+# 4. Run poc_11 via run_all.sh (or directly)
+bash autofyn_audit/run_all.sh
+# poc_11 emits:
+#   [[ AUDIT-RESULT ]] cors_credentialed_origin_reflection :: FAIL :: CORSMiddleware reflected ...
+```
+
+### Remediation (audit-only observation — do NOT apply fix per goal constraints)
+
+**Recommended fix for operators (NOT applied):** never combine `allow_origins=["*"]` with `allow_credentials=True`; instead enumerate an explicit trusted-origin allowlist when credentials are required, or keep `allow_credentials=False`. **Framework-level:** Starlette/FastAPI could emit a warning (or refuse) when both options are combined, since the result silently disables the browser's own `*`+credentials safeguard.
 
 ---
 
