@@ -1,0 +1,9 @@
+{
+  "name": "autofyn-poc14-browser",
+  "version": "1.0.0",
+  "description": "poc_14 browser driver for CORS exfil live observation",
+  "main": "browser_exfil.js",
+  "dependencies": {
+    "playwright": "1.49.0"
+  }
+}

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<!-- AUTOFYN_BROWSER_POC14 -->
+<html lang="en">
+<head><meta charset="utf-8"><title>attacker page</title></head>
+<body>
+<!-- This page is served at the attacker origin (https://attacker-origin:8443).
+     Its only function is to provide a genuine cross-origin document context
+     from which the Playwright driver invokes fetch() via page.evaluate().
+     The fetch runs in attacker-origin context — this is a real cross-origin
+     credentialed request, not a same-origin one.
+     This marker comment (AUTOFYN_BROWSER_POC14) is distinct from all prior
+     PoC markers and is never serialized into /openapi.json. -->
+<script>
+/* placeholder — Playwright injects the actual test code via page.evaluate() */
+</script>
+</body>
+</html>
