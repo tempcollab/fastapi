@@ -37,3 +37,10 @@ PLAYWRIGHT_IMAGE_DIGEST="sha256:0fc07c73230cb7c376a528d7ffc83c4bdcdcd3fc7efbe54a
 PLAYWRIGHT_VERSION="1.49.0"
 # Sidecar name used by poc_14; NEVER touch protected containers.
 BROWSER_SIDECAR_NAME="autofyn-audit-browser-sidecar"
+
+# poc_14 pre-flight / pass-through curl image — pinned by digest for reproducibility.
+# Runs as a throwaway sidecar on autofyn-audit-net so curls reach autofyn-audit-target
+# by name (the invoking shell cannot reach the target under gVisor/DinD).
+# Digest resolved by orchestrator this round: docker pull curlimages/curl:8.11.1
+# and docker inspect --format '{{index .RepoDigests 0}}'.
+POC14_CURL_IMAGE="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"

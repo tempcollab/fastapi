@@ -87,6 +87,15 @@ WHOAMI_URL="${BASE_URL}/cors-protected/whoami"
 NOCORS_URL="${BASE_URL}/no-cors-here"
 VICTIM_COOKIE="session=AUTOFYN_VICTIM_SESSION_b41d2e"
 
+# ── net_curl helper ───────────────────────────────────────────────────────────
+# Run curl inside a throwaway container on autofyn-audit-net so the target
+# is reachable by name (the invoking shell cannot reach it under gVisor/DinD).
+# All arguments are forwarded verbatim to curl inside the container.
+# stdout/stderr propagate to the host via docker run.
+net_curl() {
+    docker run --rm --network "${NETWORK_NAME}" "${POC14_CURL_IMAGE}" curl "$@"
+}
+
 echo "=== poc_14: Chain B Step 3 LIVE-OBSERVED via real headless Chromium ==="
 echo "Endpoint   : ${WHOAMI_URL} (positive)"
 echo "             ${NOCORS_URL} (negative control)"
@@ -113,11 +122,14 @@ echo "────────────────────────�
 echo "Pre-flight curl gates (target smoke-test)"
 echo "──────────────────────────────────────────────────────────────────────────────"
 
+# Validate NETWORK_NAME before first net_curl (net_curl interpolates it into docker run --network)
+assert_safe_resource_name network "${NETWORK_NAME}"
+
 PREFLIGHT_OK=1
 
 # Gate 1: /cors-protected/login → Set-Cookie with SameSite=None; Secure
 echo "--- Gate 1: /cors-protected/login → expect Set-Cookie SameSite=None; Secure ---"
-LOGIN_HDRS="$(curl -sS -D - -o /dev/null --max-time 10 \
+LOGIN_HDRS="$(net_curl -sS -D - -o /dev/null --max-time 10 \
     "${BASE_URL}/cors-protected/login" 2>&1 || echo "CURL_FAILED")"
 LOGIN_LC="$(printf '%s' "${LOGIN_HDRS}" | tr '[:upper:]' '[:lower:]')"
 if assert_contains "${LOGIN_LC}" "set-cookie" && \
@@ -133,7 +145,7 @@ echo ""
 
 # Gate 2: /no-cors-here + Origin → NO Access-Control-Allow-Origin (hard gate)
 echo "--- Gate 2: /no-cors-here + Origin: ${ATTACKER_ORIGIN} → expect NO ACAO ---"
-NOCORS_HDRS="$(curl -sS -D - -o /dev/null --max-time 10 \
+NOCORS_HDRS="$(net_curl -sS -D - -o /dev/null --max-time 10 \
     -H "Origin: ${ATTACKER_ORIGIN}" \
     -H "Cookie: ${VICTIM_COOKIE}" \
     "${NOCORS_URL}" 2>&1 || echo "CURL_FAILED")"
@@ -150,7 +162,7 @@ echo ""
 
 # Gate 3: /no-cors-here 401 without cookie → genuinely session-gated
 echo "--- Gate 3: /no-cors-here (no cookie) → expect HTTP 401 ---"
-NOCORS_CODE="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
+NOCORS_CODE="$(net_curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
     "${NOCORS_URL}" 2>&1 || echo "000")"
 if [[ "${NOCORS_CODE}" == "401" ]]; then
     echo "[OK] Gate 3: /no-cors-here is session-gated (401 without cookie)."
@@ -286,11 +298,12 @@ process.stdout.write("session_path="+(r.session_path||"unknown")+"\n");'
 
         echo "  positive_read            : ${POSITIVE_READ}"
         echo "  positive_body_has_secret : ${POSITIVE_BODY_HAS_SECRET}"
-        echo "  acao_seen                : ${ACAO_SEEN}"
-        echo "  acac_true                : ${ACAC_TRUE}"
+        echo "  acao_seen (wire)         : ${ACAO_SEEN}  [Playwright network observation]"
+        echo "  acac_true (wire)         : ${ACAC_TRUE}  [Playwright network observation]"
         echo "  negative_blocked         : ${NEGATIVE_BLOCKED}"
         echo "  negative_threw           : ${NEGATIVE_THREW}"
         echo "  session_path             : ${SESSION_PATH}"
+        echo "  Note: js_acao_seen/js_acac_true are null/false by CORS design (informational only)"
     else
         echo "[WARN] Could not parse browser result JSON."
         BROWSER_HARNESS_OK=0

